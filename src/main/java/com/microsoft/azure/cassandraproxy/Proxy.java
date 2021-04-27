@@ -170,6 +170,7 @@ public class Proxy extends AbstractVerticle {
                     }
 
                 }
+                // TODO: Scan for uuid() inserts and replace UUID as needed
 //                if (state==FastDecode.State.analyze || state==FastDecode.State.query) {
 //                    BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
 //                    try {

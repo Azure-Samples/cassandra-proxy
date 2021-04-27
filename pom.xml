@@ -43,8 +43,7 @@
                             <transformer
                                     implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                 <manifestEntries>
-                                    <Main-Class>io.vertx.core.Launcher</Main-Class>
-                                    <Main-Verticle>Proxy</Main-Verticle>
+                                    <Main-Class>com.microsoft.azure.cassandraproxy.Proxy</Main-Class>
                                 </manifestEntries>
                             </transformer>
                         </transformers>
