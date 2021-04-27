@@ -16,15 +16,15 @@
 
 package com.microsoft.azure.cassandraproxy;
 
-import com.datastax.oss.protocol.internal.Compressor;
-import com.datastax.oss.protocol.internal.Frame;
-import com.datastax.oss.protocol.internal.FrameCodec;
-import com.datastax.oss.protocol.internal.ProtocolConstants;
+import com.datastax.oss.protocol.internal.*;
 import com.datastax.oss.protocol.internal.request.Options;
 import com.datastax.oss.protocol.internal.request.Query;
 import com.datastax.oss.protocol.internal.request.Startup;
+import com.datastax.oss.protocol.internal.response.Error;
 import com.datastax.oss.protocol.internal.response.Ready;
+import com.datastax.oss.protocol.internal.response.Result;
 import com.datastax.oss.protocol.internal.response.Supported;
+import io.netty.util.collection.ByteCollections;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
@@ -40,6 +40,7 @@ import java.util.logging.*;
 public class Proxy extends AbstractVerticle {
     private static final Logger LOG = Logger.getLogger(Proxy.class.getName());
     private static final String CASSANDRA_SERVER_PORT = "29042";
+    public static final String PROTOCOL_VERSION = "protocol-version";
     private static CommandLine commandLine;
     private BufferCodec bufferCodec = new BufferCodec();
     FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
@@ -98,7 +99,12 @@ public class Proxy extends AbstractVerticle {
                         .setDefaultValue("1"))
                 .addOption(new TypedOption<Integer>()
                     .setType(Integer.class)
-                    .setDescription("Supported CQL Version(s). If not set return what source sever says")
+                    .setDescription("Supported Cassandra Protocol Version(s). If not set return what source server says")
+                    .setLongName(PROTOCOL_VERSION)
+                    .setMultiValued(true));
+                .addOption(new TypedOption<Integer>()
+                    .setType(Integer.class)
+                    .setDescription("Supported Cassandra CQL Version(s). If not set return what source server says")
                     .setLongName("cql-version")
                     .setMultiValued(true));
         // TODO: Add trust store, client certs, etc.
@@ -154,10 +160,10 @@ public class Proxy extends AbstractVerticle {
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
                 FastDecode.State state = FastDecode.quickLook(buffer);
                 // Check if we support the protocol version
-                if (commandLine.getOptionValues("cql-version")!= null) {
+                if (commandLine.getOptionValues(PROTOCOL_VERSION)!= null && !commandLine.getOptionValues(PROTOCOL_VERSION).isEmpty()) {
                     int protocolVersion = buffer.getByte(0) & 0b0111_1111;
                     boolean found = false;
-                    for (Object o : commandLine.getOptionValues("cql-version")) {
+                    for (Object o : commandLine.getOptionValues(PROTOCOL_VERSION)) {
                         if (o.equals(protocolVersion))
                         {
                             found = true;
@@ -165,11 +171,28 @@ public class Proxy extends AbstractVerticle {
                         }
                     }
                     if (!found) {
-                        LOG.severe("Todo: Implement error when wrong protocol");
+                        LOG.info("Downgrading Protocol from " + protocolVersion);
+                        StringBuilder supported = new StringBuilder("Invalid or unsupported protocol version (");
+                        supported = supported.append(protocolVersion).append("); supported versions are (");
+                        Iterator i = commandLine.getOptionValues(PROTOCOL_VERSION).iterator();
+                        while (i.hasNext()) {
+                            Object o = i.next();
+                            supported = supported.append(o).append("/v").append(o);
+                            if (i.hasNext()) {
+                                supported = supported.append(",");
+                            }
+                        }
+                        supported = supported.append(")");
+
+                        Error e = new Error(10, supported.toString());
+                        // TODO extract streamid
+                        Frame f = Frame.forResponse(protocolVersion, 0, null, Collections.emptyMap() , Collections.emptyList(), e);
+                        socket.write(serverCodec.encode(f).buffer);
                         return;
                     }
 
                 }
+                // TODO: Scan for uuid() inserts and replace UUID as needed
 //                if (state==FastDecode.State.analyze || state==FastDecode.State.query) {
 //                    BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
 //                    try {
@@ -189,10 +212,12 @@ public class Proxy extends AbstractVerticle {
                 Future<Buffer> f1 = client1.writeToServer(buffer).future();
                 Future<Buffer> f2 = client2.writeToServer(buffer).future();
                 CompositeFuture.all(f1, f2).onComplete(e -> {
-                    if ((commandLine.getOptionValues("cql-version")!= null) && (state == FastDecode.State.options))
+                    if ((commandLine.getOptionValues("cql-version")!= null || commandLine.getOptionValues(PROTOCOL_VERSION) != null) && (state == FastDecode.State.options))
                     {
                         // Todo force our version
                         LOG.severe("Todo: Implement response with our favorite versions");
+
+                        //Message supported = new Supported()
                         Buffer buf = f1.result();
                     }
                     Buffer buf = f1.result();
