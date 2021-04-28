@@ -101,12 +101,17 @@ public class Proxy extends AbstractVerticle {
                     .setType(Integer.class)
                     .setDescription("Supported Cassandra Protocol Version(s). If not set return what source server says")
                     .setLongName(PROTOCOL_VERSION)
-                    .setMultiValued(true));
-                .addOption(new TypedOption<Integer>()
-                    .setType(Integer.class)
+                    .setMultiValued(true))
+                .addOption(new Option()
                     .setDescription("Supported Cassandra CQL Version(s). If not set return what source server says")
                     .setLongName("cql-version")
-                    .setMultiValued(true));
+                    .setMultiValued(true))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("uuid")
+                        .setDescription("scan for uuid and generate on proxy for inserts/updates")
+                        .setFlag(true));
+
         // TODO: Add trust store, client certs, etc.
 
         try {
@@ -149,12 +154,19 @@ public class Proxy extends AbstractVerticle {
             System.exit(-1);
         }
 
+        List<String> protocolVersions = new ArrayList<>();
+        if (commandLine.getOptionValues(PROTOCOL_VERSION)!= null) {
+            for (Object protocolVersion : commandLine.getOptionValues(PROTOCOL_VERSION)) {
+                protocolVersions.add(protocolVersion + "/v" + protocolVersion);
+            }
+        }
+
         NetServer server = vertx.createNetServer(options);
 
         server.connectHandler(socket -> {
-            ProxyClient client1 = new ProxyClient("client1", socket);
+            ProxyClient client1 = new ProxyClient("client1", socket, protocolVersions, commandLine.getOptionValues("cql-version"));
             Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"));
-            ProxyClient client2 = new ProxyClient("client2", null);
+            ProxyClient client2 = new ProxyClient("client2", null, null, null);
             Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"));
             LOG.info("Both server up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
@@ -184,13 +196,13 @@ public class Proxy extends AbstractVerticle {
                         }
                         supported = supported.append(")");
 
+                        // generate a protocol error
                         Error e = new Error(10, supported.toString());
-                        // TODO extract streamid
-                        Frame f = Frame.forResponse(protocolVersion, 0, null, Collections.emptyMap() , Collections.emptyList(), e);
+                        int streamId = buffer.getShort(2);
+                        Frame f = Frame.forResponse(protocolVersion, streamId, null, Collections.emptyMap() , Collections.emptyList(), e);
                         socket.write(serverCodec.encode(f).buffer);
                         return;
                     }
-
                 }
                 // TODO: Scan for uuid() inserts and replace UUID as needed
 //                if (state==FastDecode.State.analyze || state==FastDecode.State.query) {
@@ -212,14 +224,6 @@ public class Proxy extends AbstractVerticle {
                 Future<Buffer> f1 = client1.writeToServer(buffer).future();
                 Future<Buffer> f2 = client2.writeToServer(buffer).future();
                 CompositeFuture.all(f1, f2).onComplete(e -> {
-                    if ((commandLine.getOptionValues("cql-version")!= null || commandLine.getOptionValues(PROTOCOL_VERSION) != null) && (state == FastDecode.State.options))
-                    {
-                        // Todo force our version
-                        LOG.severe("Todo: Implement response with our favorite versions");
-
-                        //Message supported = new Supported()
-                        Buffer buf = f1.result();
-                    }
                     Buffer buf = f1.result();
                     if (!f1.result().equals(f2.result())) {
                         LOG.info("Diferent result");
@@ -229,12 +233,12 @@ public class Proxy extends AbstractVerticle {
                     socket.write(buf);
                     if (socket.writeQueueFull()) {
                         LOG.warning("Pausing processing");
-                        client1.fastDecode.pause();
-                        client2.fastDecode.pause();
+                        client1.pause();
+                        client2.pause();
                         socket.drainHandler(done -> {
                             LOG.warning("Resuming processing");
-                            client1.fastDecode.resume();
-                            client2.fastDecode.resume();
+                            client1.resume();
+                            client2.resume();
                        });
                     }
                 });

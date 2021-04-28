@@ -1,7 +1,7 @@
-## [project-title] Changelog
+## Cassandra Proxy Changelog
 
-<a name="x.y.z"></a>
-# x.y.z (yyyy-mm-dd)
+<a name="0.0.1"></a>
+# 0.0.1 (yyyy-mm-dd)
 
 *Features*
 * ...
