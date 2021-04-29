@@ -17,34 +17,46 @@
 package com.microsoft.azure.cassandraproxy;
 
 import com.datastax.oss.protocol.internal.*;
-import com.datastax.oss.protocol.internal.request.Options;
+import com.datastax.oss.protocol.internal.request.Batch;
 import com.datastax.oss.protocol.internal.request.Query;
-import com.datastax.oss.protocol.internal.request.Startup;
 import com.datastax.oss.protocol.internal.response.Error;
-import com.datastax.oss.protocol.internal.response.Ready;
-import com.datastax.oss.protocol.internal.response.Result;
-import com.datastax.oss.protocol.internal.response.Supported;
-import io.netty.util.collection.ByteCollections;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.PemKeyCertOptions;
+import sun.rmi.runtime.Log;
 
+import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.logging.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 
 /*-h localhost localhost --proxy-pem-keyfile /home/german/Project/cassandra-proxy/src/main/resources/server.pem --proxy-pem-certfile /home/german/Project/cassandra-proxy/src/main/resources/server.key*/
 public class Proxy extends AbstractVerticle {
+    public static final String UUID = "UUID()";
+    public static final String NOW = "NOW()";
     private static final Logger LOG = Logger.getLogger(Proxy.class.getName());
-    private static final String CASSANDRA_SERVER_PORT = "29042";
+    public static final String CASSANDRA_SERVER_PORT = "29042";
     public static final String PROTOCOL_VERSION = "protocol-version";
     private static CommandLine commandLine;
+    private static Pattern VALUES = Pattern.compile("VALUES\\s*\\((.*)\\)");
     private BufferCodec bufferCodec = new BufferCodec();
-    FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
-    FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
+    private FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
+    private FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
+    private  final UUIDGenWrapper  uuidGenWrapper;
+
+
+    public Proxy() {
+        this.uuidGenWrapper = new UUIDGenWrapper();
+    }
+    //for tests
+    public Proxy(UUIDGenWrapper uuidGenWrapper) {
+        this.uuidGenWrapper = uuidGenWrapper;
+    }
 
     public static void main(String[] args)
     {
@@ -57,7 +69,8 @@ public class Proxy extends AbstractVerticle {
                         .setLongName("wait")
                         .setShortName("W")
                         .setDescription("wait for write completed on both clusters")
-                        .setFlag(true))
+                        .setFlag(true)
+                        .setDefaultValue("true"))
                 .addArgument(new Argument()
                         .setDescription("Source cluster. This is the cluster which is authorative for reads")
                         .setRequired(true)
@@ -110,6 +123,7 @@ public class Proxy extends AbstractVerticle {
                         .setType(Boolean.class)
                         .setLongName("uuid")
                         .setDescription("scan for uuid and generate on proxy for inserts/updates")
+                        .setDefaultValue("true")
                         .setFlag(true));
 
         // TODO: Add trust store, client certs, etc.
@@ -126,6 +140,14 @@ public class Proxy extends AbstractVerticle {
         if (!commandLine.isValid() && commandLine.isAskingForHelp()) {
             help(cli);
             System.exit(-1);
+        }
+
+        for (Option o : cli.getOptions()) {
+            LOG.info(o.getName() + " : " + commandLine.getOptionValue(o.getName()));
+        }
+
+        for (Argument a : cli.getArguments()) {
+            LOG.info(a.getArgName() + " : " + commandLine.getArgumentValue(a.getArgName()));
         }
 
         LOG.info("Cassandra Proxy starting...");
@@ -204,23 +226,19 @@ public class Proxy extends AbstractVerticle {
                         return;
                     }
                 }
-                // TODO: Scan for uuid() inserts and replace UUID as needed
-//                if (state==FastDecode.State.analyze || state==FastDecode.State.query) {
-//                    BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
-//                    try {
-//                        Frame f = serverCodec.decode(buffer2);
-//                        LOG.info("Recieved: " + f.message);
-//                        if (f.message instanceof Query) {
-//                            Query q = (Query)f.message;
-//                            if (q.query.equals("SELECT * FROM system.peers"))
-//                            {
-//                                LOG.fine("Peers!");
-//                            }
-//                        }
-//                    } catch (Exception e) {
-//                        LOG.severe("Eception during decoding: " + e);
-//                    }
-//                }
+
+                //Todo: Do we need to fake peers? Given that we wuld need to also come up with tokens that seems
+                // future work when C* is smart enough to deal with multiple C* on the same node but idifferent ports
+                // right now it will alwaays connect to proxy if we set the proxy port even if there is C* running
+                // on another port.
+
+
+                if ((Boolean)commandLine.getOptionValue("uuid")
+                        && state==FastDecode.State.query
+                        && scanForUUID(buffer))
+                {
+                    buffer = handleUUID(buffer);
+                }
                 Future<Buffer> f1 = client1.writeToServer(buffer).future();
                 Future<Buffer> f2 = client2.writeToServer(buffer).future();
                 CompositeFuture.all(f1, f2).onComplete(e -> {
@@ -254,5 +272,85 @@ public class Proxy extends AbstractVerticle {
             }
         });
 
+    }
+
+    protected Buffer handleUUID(Buffer buffer) {
+        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+        try {
+            Frame f = serverCodec.decode(buffer2);
+            LOG.info("Recieved: " + f.message);
+            Message newMessage = f.message;
+            if (f.message instanceof Query) {
+                Query q = (Query)f.message;
+                // Ideally we would be more targeted in replacing especially for
+                // UPDATE and just target the SET part or the VALUES part
+                // BATCH at least run by cqlsh will also come in as Query and not Batch type
+                // so we handle this here as well.
+                if (q.query.toUpperCase().startsWith("INSERT")
+                        || q.query.toUpperCase().startsWith("UPDATE")
+                        || (q.query.toUpperCase().startsWith("BEGIN BATCH") && (
+                                q.query.toUpperCase().contains("INSERT") || q.query.toUpperCase().contains("UPDATE"))))
+                {
+                    String s = getReplacedQuery(q.query, UUID);
+                    s = getReplacedQuery(s, NOW);
+                    newMessage = new Query(s, q.options);
+                }
+            } else if (f.message instanceof Batch) {
+                // Untested...
+                Batch b = (Batch) f.message;
+                List<Object> queriesOrIds = new ArrayList<>();
+                for (Object o : b.queriesOrIds) {
+                    LOG.info("String: " + o + " " + o.getClass());
+                    if (o instanceof String) {
+                        // it's a query and not just an id
+                        String s = getReplacedQuery((String)o, UUID);
+                        o = getReplacedQuery(s, NOW);
+                    }
+                    queriesOrIds.add(o);
+                }
+                List<List<ByteBuffer>> values = new ArrayList<>();
+                for (List<ByteBuffer> list : b.values) {
+                    List<ByteBuffer> v = new ArrayList<>();
+                    for (ByteBuffer bb : list) {
+                        String s = bb.toString();
+                        if (s.trim().equalsIgnoreCase(UUID) || s.trim().equalsIgnoreCase(NOW)) {
+                            ByteBuffer newBB = ByteBuffer.wrap(uuidGenWrapper.getTimeUUID().toString().getBytes());
+                           v.add(newBB);
+                           LOG.info("replaced " + s + "with " + newBB);
+                        } else {
+                            v.add(bb);
+                        }
+                    }
+                    values.add(v);
+                }
+                newMessage = new Batch(b.type, queriesOrIds, values, b.consistency, b.serialConsistency, b.defaultTimestamp, b.keyspace, b.nowInSeconds);
+            }
+            //  TODO: transform out prepared statement
+            LOG.info("Replaced: " + newMessage);
+            Frame g =  Frame.forRequest(f.protocolVersion, f.streamId, f.tracing, f.customPayload, newMessage);
+            buffer = clientCodec.encode(g).buffer;
+        } catch (Exception e) {
+            LOG.severe("Exception during decoding: " + e);
+        }
+        return buffer;
+    }
+
+    protected String getReplacedQuery(String q, String search) {
+        int i = q.toUpperCase().indexOf(search);
+        int j = 0;
+        StringBuilder sb = new StringBuilder();
+        while (i!=-1) {
+           sb.append(q.substring(j, i));
+           j = i + search.length();
+           sb.append(uuidGenWrapper.getTimeUUID());
+           i = q.toUpperCase().indexOf(UUID, j);
+        }
+        sb.append(q.substring(j));
+        return sb.toString();
+    }
+
+    private boolean scanForUUID(Buffer buffer) {
+        String s = buffer.getString(9, buffer.length());
+        return s.toUpperCase().contains(UUID) || s.toUpperCase().contains(NOW);
     }
 }

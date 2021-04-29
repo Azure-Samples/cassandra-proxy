@@ -210,7 +210,7 @@ public class FastDecode implements ReadStream<Buffer>, Handler<Buffer>
     }
 
     public enum State {
-        query, write, analyze, result, prepare, error, event, supported;
+        query, analyze, result, prepare, error, event, supported;
     }
 
     public static State quickLook(Buffer buffer)
@@ -220,10 +220,9 @@ public class FastDecode implements ReadStream<Buffer>, Handler<Buffer>
         switch (opcode)
         {
             case ProtocolConstants.Opcode.QUERY:
-                return State.query;
             case ProtocolConstants.Opcode.BATCH:
             case ProtocolConstants.Opcode.EXECUTE:
-                return State.write;
+                return State.query;
             case ProtocolConstants.Opcode.PREPARE:
                 return State.prepare;
             case ProtocolConstants.Opcode.ERROR:
