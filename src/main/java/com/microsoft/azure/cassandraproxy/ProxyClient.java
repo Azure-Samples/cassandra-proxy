@@ -122,7 +122,7 @@ public class ProxyClient  {
     {
             FastDecode.State state = fastDecode.quickLook(buffer);
             // Handle Supported
-            if ((serverSocket != null) && (state == FastDecode.State.supported)) {
+            if ((serverSocket != null) && (state == FastDecode.State.supported) && (!protocolVersions.isEmpty() || !cqlVersions.isEmpty())) {
                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
                 Frame r = clientCodec.decode(buffer2);
                 Supported supported = (Supported) r.message;
@@ -168,7 +168,7 @@ public class ProxyClient  {
             }
             results.remove(streamId); // we are done with that
         } else {
-            LOG.warning ("Stream Id " + streamId + " no registered");
+            LOG.warning ("Stream Id " + streamId + " no registered. Are you using TLS on a non TLS connection?");
         }
     }
 

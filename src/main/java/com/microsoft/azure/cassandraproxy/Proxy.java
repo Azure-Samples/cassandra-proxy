@@ -54,8 +54,10 @@ public class Proxy extends AbstractVerticle {
         this.uuidGenWrapper = new UUIDGenWrapper();
     }
     //for tests
-    public Proxy(UUIDGenWrapper uuidGenWrapper) {
+    public Proxy(UUIDGenWrapper uuidGenWrapper, FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec, FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec) {
         this.uuidGenWrapper = uuidGenWrapper;
+        this.serverCodec = serverCodec;
+        this.clientCodec = clientCodec;
     }
 
     public static void main(String[] args)
@@ -151,9 +153,10 @@ public class Proxy extends AbstractVerticle {
         }
 
         LOG.info("Cassandra Proxy starting...");
-        DeploymentOptions options = new DeploymentOptions().setInstances(commandLine.getOptionValue("threads"));
         Vertx vertx = Vertx.vertx();
-        vertx.deployVerticle(new Proxy());
+        for (int i=0; i< (Integer)commandLine.getOptionValue("threads"); i++) {
+            vertx.deployVerticle(new Proxy());
+        }
     }
 
     private static void help(CLI cli) {
@@ -221,7 +224,7 @@ public class Proxy extends AbstractVerticle {
                         // generate a protocol error
                         Error e = new Error(10, supported.toString());
                         int streamId = buffer.getShort(2);
-                        Frame f = Frame.forResponse(protocolVersion, streamId, null, Collections.emptyMap() , Collections.emptyList(), e);
+                        Frame f = Frame.forResponse((Integer)commandLine.getOptionValues(PROTOCOL_VERSION).get(0), streamId, null, Collections.emptyMap() , Collections.emptyList(), e);
                         socket.write(serverCodec.encode(f).buffer);
                         return;
                     }
