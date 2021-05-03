@@ -18,8 +18,8 @@ it is advised to run multiple proxies.
 1. git clone https://github.com/Azure-Samples/cassandra-proxy.git
 2. cd cassandra-proxy
 3. mvn package
-4. java -jar target/cassandra-proxy-1.0-SNAPSHOT-fat.jar <source-server> <destination-server>
-5. cqlsh  -u <user> -p <password> localhost 29042
+4. java -jar target/cassandra-proxy-1.0-SNAPSHOT-fat.jar source-server destination-server
+5. cqlsh  -u user -p password localhost 29042
 
 ### Plans
 * Read Reports
