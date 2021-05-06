@@ -21,20 +21,25 @@ import com.datastax.oss.protocol.internal.Frame;
 import com.datastax.oss.protocol.internal.FrameCodec;
 import com.datastax.oss.protocol.internal.ProtocolConstants;
 import com.datastax.oss.protocol.internal.response.Supported;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.NetClientOptions;
+import io.vertx.micrometer.backends.BackendRegistries;
 
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.*;
+import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ProxyClient  {
-    private static final Logger LOG = Logger.getLogger(ProxyClient.class.getName());
+    private static final Logger LOG = LoggerFactory.getLogger(ProxyClient.class);
     private static final int CASSANDRA_PROTOCOL_VERSION = ProtocolConstants.Version.V3;
     private static final BufferCodec bufferCodec = new BufferCodec();
     private static final FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
@@ -42,6 +47,8 @@ public class ProxyClient  {
     private final String identifier;
     private final List<String> protocolVersions;
     private final List<String> cqlVersions;
+    private final boolean metrics;
+    private final boolean wait;
     private NetSocket socket;
     private Promise<Void> socketPromise;
     private Promise<Buffer> bufferPromise = Promise.promise();
@@ -52,11 +59,17 @@ public class ProxyClient  {
     private Map<Short, Promise> results = new ConcurrentHashMap<>();
 
 
-    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions) {
+    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, boolean metrics, boolean wait) {
         this.identifier = identifier;
         this.serverSocket = socket;
         this.protocolVersions = protocolVersions;
         this.cqlVersions = cqlVersions;
+        this.metrics = metrics;
+        this.wait = wait;
+    }
+
+    public ProxyClient(String identifier, boolean metrics) {
+        this(identifier, null, null, null, metrics, true);
     }
 
     public void pause() {
@@ -82,7 +95,7 @@ public class ProxyClient  {
                 fastDecode.endHandler(x->{LOG.info("Server connection closed");});
                 socketPromise.complete();
             }  else {
-                LOG.severe("Couldn't connect to server");
+                LOG.error("Couldn't connect to server");
                 socketPromise.fail("Couldn't connect to server");
             }
         });
@@ -106,12 +119,21 @@ public class ProxyClient  {
     private void write(Buffer buffer) {
         socket.write(buffer);
         if (socket.writeQueueFull()) {
-            LOG.warning(identifier + " Write Queue full!");
+            LOG.warn("{} Write Queue full!", identifier);
+            final long startPause = System.nanoTime();
             if (serverSocket != null) {
                 serverSocket.pause();
                 socket.drainHandler(done -> {
-                    LOG.warning("Resume processing");
+                    LOG.warn("Resume processing");
                     serverSocket.resume();
+                    if (metrics) {
+                        MeterRegistry registry = BackendRegistries.getDefaultNow();
+                        Timer.builder("cassandraProxy.serverSocket.paused")
+                                .tag("serverAddress", socket.remoteAddress().toString())
+                                .tag("severIdentifier", identifier)
+                                .register(registry)
+                                .record(System.nanoTime() - startPause, TimeUnit.NANOSECONDS);
+                    }
                 });
             }
         }
@@ -126,7 +148,7 @@ public class ProxyClient  {
                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
                 Frame r = clientCodec.decode(buffer2);
                 Supported supported = (Supported) r.message;
-                LOG.info("Recieved from Server " + identifier + ":" + supported);
+                LOG.info("Recieved from Server {} : {}", identifier, supported);
                 // INFO: Recieved from Server client2:SUPPORTED {PROTOCOL_VERSIONS=[3/v3, 4/v4, 5/v5-beta], COMPRESSION=[snappy, lz4], CQL_VERSION=[3.4.4]}
                 Map<String, List<String>> options = new HashMap<>(supported.options);
                 if ((protocolVersions != null) && (!protocolVersions.isEmpty())) {
@@ -136,7 +158,7 @@ public class ProxyClient  {
                     options.put("CQL_VERSION", cqlVersions);
                 }
                 supported = new Supported(options);
-                LOG.info("Sending to Client " + identifier + ":" + supported);
+                LOG.info("Sending to Client {} : {}", identifier, supported);
                 Frame f = Frame.forResponse(r.protocolVersion, r.streamId, r.tracingId, r.customPayload , r.warnings, supported);
                 sendResult(serverCodec.encode(f).buffer);
                 return;
@@ -147,10 +169,10 @@ public class ProxyClient  {
                 try {
                     BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
                     Frame r = clientCodec.decode(buffer2);
-                    LOG.info("Recieved from Server " + identifier + ":" + r.message);
+                    LOG.info("Recieved from Server {} : {}", identifier , r.message);
                     sendResult(buffer);
                 } catch (Exception e) {
-                    LOG.severe("Failed decoding: " + e);
+                    LOG.error("Failed decoding: ", e);
                     if (socketPromise.tryComplete()) {
                        sendResult(buffer);
                     }
@@ -161,14 +183,33 @@ public class ProxyClient  {
     }
 
     private void sendResult(Buffer buffer) {
+        if (!wait && socket != null) {
+            socket.write(buffer);
+            if (socket.writeQueueFull()) {
+                LOG.warn("Pausing processing");
+                this.pause();
+                final long startPause = System.nanoTime();
+                socket.drainHandler(done -> {
+                    LOG.warn("Resuming processing");
+                    this.resume();
+                    if (metrics) {
+                        MeterRegistry registry = BackendRegistries.getDefaultNow();
+                        Timer.builder("cassandraProxy.clientSocket.paused")
+                                .tag("clientAddress", socket.remoteAddress().toString())
+                                .tag("wait", String.valueOf(wait)).register(registry)
+                                .record(System.nanoTime() - startPause, TimeUnit.NANOSECONDS);
+                    }
+                });
+            }
+        }
         short streamId = buffer.getShort(2);
         if (results.containsKey(streamId)) {
             if (!results.get(streamId).tryComplete(buffer)) {
-                LOG.warning("out of band: " + buffer);
+                LOG.warn("out of band: {}", buffer);
             }
             results.remove(streamId); // we are done with that
         } else {
-            LOG.warning ("Stream Id " + streamId + " no registered. Are you using TLS on a non TLS connection?");
+            LOG.warn ("Stream Id {} no registered. Are you using TLS on a non TLS connection?", streamId);
         }
     }
 
