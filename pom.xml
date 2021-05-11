@@ -90,6 +90,33 @@
                 </execution>
             </executions>
         </plugin>
+        <!-- <plugin>
+            <groupId>com.google.cloud.tools</groupId>
+            <artifactId>jib-maven-plugin</artifactId>
+            <version>1.6.1</version>
+            <configuration>
+                <from>
+                    <image>openjdk:11.0.4-jre-slim</image>
+                </from>
+                <to>
+                    <image>cosmos.microsoft.com/${project.artifactId}:latest</image>
+                </to>
+                <container>
+                    <jvmFlags>
+                        <jvmFlag>-server</jvmFlag>
+                    </jvmFlags>
+                </container>
+            </configuration>
+            <executions>
+                <execution>
+                    <id>build-and-push-docker-image</id>
+                    <phase>package</phase>
+                    <goals>
+                        <goal>dockerBuild</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin> -->
     </plugins>
 </build>
 </project>

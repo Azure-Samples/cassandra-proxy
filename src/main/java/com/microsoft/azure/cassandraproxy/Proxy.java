@@ -180,7 +180,7 @@ public class Proxy extends AbstractVerticle {
         LOG.info("Cassandra Proxy starting...");
         VertxOptions options = new VertxOptions();
         //  Micrometer
-        if (commandLine.getOptionValue("metrics")) {
+        if ((Boolean)commandLine.getOptionValue("metrics")) {
             options.setMetricsOptions(
                     new MicrometerMetricsOptions()
                             .setPrometheusOptions(new VertxPrometheusOptions().setEnabled(true)
@@ -230,7 +230,7 @@ public class Proxy extends AbstractVerticle {
         server.connectHandler(socket -> {
             ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"));
             Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"));
-            ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  commandLine.getOptionValue("metrics"));
+            ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"));
             Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"));
             LOG.info("Connection to both Cassandra servers up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
@@ -263,7 +263,7 @@ public class Proxy extends AbstractVerticle {
                 Future<Buffer> f2 = client2.writeToServer(buffer).future();
                 CompositeFuture.all(f1, f2).onComplete(e -> {
                     Buffer buf = f1.result();
-                    if (commandLine.getOptionValue("metrics")) {
+                    if ((Boolean)commandLine.getOptionValue("metrics")) {
                         sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
                     }
 
@@ -305,7 +305,7 @@ public class Proxy extends AbstractVerticle {
         Error e = new Error(10, supported.toString());
         int streamId = buffer.getShort(2);
         Frame f = Frame.forResponse((Integer) commandLine.getOptionValues(PROTOCOL_VERSION).get(0), streamId, null, Collections.emptyMap(), Collections.emptyList(), e);
-        if (commandLine.getOptionValue("metrics")) {
+        if ((Boolean)commandLine.getOptionValue("metrics")) {
             MeterRegistry registry = BackendRegistries.getDefaultNow();
             Timer.builder("cassandraProxy.cqlOperation.proxyTime")
                     .tag("requestOpcode", String.valueOf(opcode))
@@ -344,7 +344,7 @@ public class Proxy extends AbstractVerticle {
                 LOG.warn("Resuming processing");
                 client1.resume();
                 client2.resume();
-                if (commandLine.getOptionValue("metrics")) {
+                if ((Boolean)commandLine.getOptionValue("metrics")) {
                     MeterRegistry registry = BackendRegistries.getDefaultNow();
                     Timer.builder("cassandraProxy.clientSocket.paused")
                             .tag("clientAddress", socket.remoteAddress().toString())

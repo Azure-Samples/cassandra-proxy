@@ -18,7 +18,7 @@ it is advised to run multiple proxies.
 
 
 ## Quickstart
-(Add steps to get up and running quickly)
+(Add steps to get up and running quickly assuming you have java and maven installed)
 
 1. git clone https://github.com/Azure-Samples/cassandra-proxy.git
 2. cd cassandra-proxy
@@ -26,12 +26,14 @@ it is advised to run multiple proxies.
 4. java -jar target/cassandra-proxy-1.0-SNAPSHOT-fat.jar source-server destination-server
 5. cqlsh  -u user -p password localhost 29042
 
+## Docker
+If you uncomment the jib plugin in the pom.xml `mvn package` will also create a (local) docker image. To use this run `docker run cosmos.microsoft.com/cassandra-proxy source destination`. You can push it to an adequate registry if needed ona  different server.
+
 ## Monitoring
 The system will log through slf4j/logback and thus allow customization of logs as needed
 
 ### Metrics
-The system is suing micrometer and provides a Prometheus compatible ednpoint. Because micrometer is pluggable
-other metric agreegator could easily be supported if needed.
+The system is using micrometer and provides a Prometheus compatible endpoint. Because micrometer is pluggable other metric aggregators could easily be supported if needed.
 
 The metrics gathered are:
 
