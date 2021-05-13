@@ -80,7 +80,6 @@ public class Proxy extends AbstractVerticle {
                         .setLongName("wait")
                         .setShortName("W")
                         .setDescription("wait for write completed on both clusters")
-                        .setFlag(true)
                         .setDefaultValue("true"))
                 .addArgument(new Argument()
                         .setDescription("Source cluster. This is the cluster which is authoritative for reads")
@@ -138,18 +137,30 @@ public class Proxy extends AbstractVerticle {
                         .setDescription("Supported Cassandra CQL Version(s). If not set return what source server says")
                         .setLongName("cql-version")
                         .setMultiValued(true))
+                .addOption(new Option()
+                        .setDescription("Supported Cassandra Compression(s). If not set return what source server says")
+                        .setLongName("compression")
+                        .setMultiValued(true))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("compression-enabled")
+                        .setDescription("If set, cassandra's compression is disabled")
+                        .setDefaultValue("true"))
                 .addOption(new TypedOption<Boolean>()
                         .setType(Boolean.class)
                         .setLongName("uuid")
                         .setDescription("scan for uuid and generate on proxy for inserts/updates")
-                        .setDefaultValue("true")
-                        .setFlag(true))
+                        .setDefaultValue("true"))
                 .addOption(new TypedOption<Boolean>()
                         .setType(Boolean.class)
                         .setLongName("metrics")
                         .setDescription("provide metrics and start metrics server")
-                        .setDefaultValue("true")
-                        .setFlag(true))
+                        .setDefaultValue("true"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("only-message")
+                        .setDescription("some C* APPIs will add payloads and warnings to each request (e.g. charges). Setting this to true will only consider the message for cqlDifferentResultCount metric ")
+                        .setDefaultValue("true"))
                 .addOption(new TypedOption<Integer>()
                         .setType(Integer.class)
                         .setDescription("Port number the promethwus metrics are available")
@@ -232,7 +243,7 @@ public class Proxy extends AbstractVerticle {
         NetServer server = vertx.createNetServer(options);
 
         server.connectHandler(socket -> {
-            ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"));
+            ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"));
             Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"));
             ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"));
             Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"));
@@ -389,68 +400,24 @@ public class Proxy extends AbstractVerticle {
 
         // Ignore prepared socne we handle that elsewhere and create a substitution, no need to count that
         // against us.
-        if (!f1.result().equals(f2.result()) && state != FastDecode.State.prepare) {
+        if (state != FastDecode.State.prepare
+                && !FastDecode.getMessage(f1.result(), ((Boolean)commandLine.getOptionValue("only-message"))).equals(FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")))) {
             // Turns out some implementations encode the result differentlty so we need to parse to be sure
             Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
             Message m1 = f.message;
-            Message m2 = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result())).message;
-            // @Todo: peers will almost always return a different result so filter some of them out
-            //      eventually to give a more realistic metric
-
-            if (!m1.equals(m2)) {
-                Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
-                        .tag("requestOpcode", String.valueOf(opcode))
-                        .tag("requestState", state.toString())
-                        .register(registry).increment();
-                LOG.info("Different result");
-                LOG.debug("Recieved cassandra server source: {} ", m1);
-                //LOG.debug("Raw: {}", f1.result());
-                LOG.debug("Recieved cassandra server destination: {} ", m2);
-                //LOG.debug("Raw: {}", f2.result());
-//                if (m1 instanceof Rows && m2 instanceof  Rows) {
-//                    Rows r1 = (Rows)m1;
-//                    Rows r2 = (Rows)m2;
-//                    ColumnSpec cs = r2.getMetadata().columnSpecs.get(0);
-//                    if (cs.ksName != "system" && !r1.getData().isEmpty() && !r2.getData().isEmpty()) {
-//                        LOG.debug("Table: {}", cs.tableName);
-//                        // C* 3.11 won't send the metadata in most cases...
-////                    for (ColumnSpec cs : r1.getMetadata().columnSpecs) {
-////                        LOG.debug("Source ks: {}", cs.ksName);
-////                        LOG.debug("Source row name: {}", cs.name);
-////                        LOG.debug("Source table name: {}", cs.tableName);
-////                        LOG.debug("Source row type: {}", cs.type);
-////                    }
-////                    for (ColumnSpec cs : r2.getMetadata().columnSpecs) {
-////                        LOG.debug("Target ks: {}", cs.ksName);
-////                        LOG.debug("Target row name: {}", cs.name);
-////                        LOG.debug("target table name: {}", cs.tableName);
-////                        LOG.debug("Target row type: {}", cs.type);
-////                    }
-//
-//                        //Comapre first row only
-//                        Iterator<ByteBuffer> bl1 = r1.getData().element().iterator();
-//                        Iterator<ByteBuffer> bl2 = r2.getData().element().iterator();
-//                        while (bl1.hasNext() && bl2.hasNext()) {
-//                            ByteBuffer bb = bl1.next();
-//                            if (bb!= null && bb.remaining()!=0) {
-//                                byte[] arr = new byte[bb.remaining()];
-//                                bb.get(arr);
-//                                LOG.debug("Source: {}", arr);
-//                            }
-//                            ByteBuffer bb2 = bl2.next();
-//                            if( bb2 != null && bb2.remaining() != 0) {
-//                                byte[] arr2 = new byte[bb2.remaining()];
-//                                bb2.get(arr2);
-//                                LOG.debug("Source: {}", arr2);
-//                            }
-//                        }
-//                    }
-//
-//
-//                }
-            } else {
-                LOG.debug("Parsed value was the same but source {} dest {}", f1.result(), f2.result());
-            }
+            Frame ff = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result()));
+            Message m2 = ff.message;
+            // .equals is often using Object.equals which is no good
+            //if (!m1.toString().equals(m2.toString())) {
+            Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
+                    .tag("requestOpcode", String.valueOf(opcode))
+                    .tag("requestState", state.toString())
+                    .register(registry).increment();
+            LOG.info("Different result");
+            LOG.debug("Recieved cassandra server source: {} ", m1);
+            LOG.debug("Raw: {}", FastDecode.getMessage(f1.result(), (Boolean)commandLine.getOptionValue("only-message")));
+            LOG.debug("Recieved cassandra server destination: {} ", m2);
+            LOG.debug("Raw: {}", FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")));
         }
         Timer.builder("cassandraProxy.cqlOperation.proxyTime")
                 .tag("requestOpcode", String.valueOf(opcode))

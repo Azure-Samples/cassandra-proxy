@@ -40,13 +40,14 @@ import org.slf4j.LoggerFactory;
 
 public class ProxyClient  {
     private static final Logger LOG = LoggerFactory.getLogger(ProxyClient.class);
-    private static final int CASSANDRA_PROTOCOL_VERSION = ProtocolConstants.Version.V3;
     private static final BufferCodec bufferCodec = new BufferCodec();
     private static final FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
     private static final FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
     private final String identifier;
     private final List<String> protocolVersions;
     private final List<String> cqlVersions;
+    private final List<String> compressions;
+    private final boolean compressionEnabled;
     private final boolean metrics;
     private final boolean wait;
     private NetSocket socket;
@@ -63,17 +64,19 @@ public class ProxyClient  {
     private Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
 
 
-    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, boolean metrics, boolean wait) {
+    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, List<String> compressions, boolean compressionEnabled, boolean metrics, boolean wait) {
         this.identifier = identifier;
         this.serverSocket = socket;
         this.protocolVersions = protocolVersions;
         this.cqlVersions = cqlVersions;
+        this.compressions = compressions;
         this.metrics = metrics;
         this.wait = wait;
+        this.compressionEnabled = compressionEnabled;
     }
 
     public ProxyClient(String identifier, boolean metrics) {
-        this(identifier, null, null, null, metrics, true);
+        this(identifier, null, null, null, null, true, metrics, true);
     }
 
     public void pause() {
@@ -163,7 +166,7 @@ public class ProxyClient  {
     {
             FastDecode.State state = fastDecode.quickLook(buffer);
             // Handle Supported
-            if ((serverSocket != null) && (state == FastDecode.State.supported) && (!protocolVersions.isEmpty() || !cqlVersions.isEmpty())) {
+            if ((serverSocket != null) && (state == FastDecode.State.supported) && (!protocolVersions.isEmpty() || !cqlVersions.isEmpty() || !compressions.isEmpty())) {
                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
                 Frame r = clientCodec.decode(buffer2);
                 Supported supported = (Supported) r.message;
@@ -175,6 +178,12 @@ public class ProxyClient  {
                 }
                 if ((cqlVersions !=null) && (!cqlVersions.isEmpty())) {
                     options.put("CQL_VERSION", cqlVersions);
+                }
+                if ((compressions !=null) && (!compressions.isEmpty())) {
+                    options.put("COMPRESSION", compressions);
+                }
+                if (!compressionEnabled) {
+                    options.put("COMPRESSION", Collections.EMPTY_LIST);
                 }
                 supported = new Supported(options);
                 LOG.info("Sending to Client {} : {}", identifier, supported);
