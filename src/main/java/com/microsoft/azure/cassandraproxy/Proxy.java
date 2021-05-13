@@ -20,6 +20,10 @@ import com.datastax.oss.protocol.internal.*;
 import com.datastax.oss.protocol.internal.request.Batch;
 import com.datastax.oss.protocol.internal.request.Query;
 import com.datastax.oss.protocol.internal.response.Error;
+import com.datastax.oss.protocol.internal.response.Result;
+import com.datastax.oss.protocol.internal.response.result.ColumnSpec;
+import com.datastax.oss.protocol.internal.response.result.Prepared;
+import com.datastax.oss.protocol.internal.response.result.Rows;
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.Timer;
 import io.vertx.core.*;
@@ -209,8 +213,8 @@ public class Proxy extends AbstractVerticle {
         NetServerOptions options = new NetServerOptions().setPort(commandLine.getOptionValue("proxy-port"));
         if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null) {
             PemKeyCertOptions pemOptions = new PemKeyCertOptions();
-            pemOptions.addCertPath(commandLine.getOptionValue("proxy-pem-keyfile"))
-                    .addKeyPath(commandLine.getOptionValue("proxy-pem-certfile"));
+            pemOptions.addCertPath(commandLine.getOptionValue("proxy-pem-certfile"))
+                    .addKeyPath(commandLine.getOptionValue("proxy-pem-keyfile"));
             options.setSsl(true).setPemKeyCertOptions(pemOptions);
         } else if (commandLine.getOptionValue("proxy-pem-keyfile") != null || commandLine.getOptionValue("proxy-pem-certfile") != null) {
             System.out.println("Both proxy-pem-keyfile and proxy-pem-certfile need to be set for TLS");
@@ -263,6 +267,23 @@ public class Proxy extends AbstractVerticle {
                 Future<Buffer> f2 = client2.writeToServer(buffer).future();
                 CompositeFuture.all(f1, f2).onComplete(e -> {
                     Buffer buf = f1.result();
+                    if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
+                        // check if we need to substitute
+                        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                        Frame r1 = clientCodec.decode(buffer2);
+                        buffer2= BufferCodec.createPrimitiveBuffer(f2.result());
+                        Frame r2 = clientCodec.decode(buffer2);
+                        if ((r1.message instanceof Prepared) && (r2.message instanceof Prepared)) {
+                            Prepared res1 = (Prepared) r1.message;
+                            Prepared res2 = (Prepared) r2.message;
+                            if (res1.preparedQueryId != res2.preparedQueryId) {
+                                LOG.info("md5 of prepared statements differ between source and target -- need to substitute");
+                                client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
+                                LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
+                            }
+                        }
+                    }
+
                     if ((Boolean)commandLine.getOptionValue("metrics")) {
                         sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
                     }
@@ -282,6 +303,7 @@ public class Proxy extends AbstractVerticle {
                 LOG.info("Server is now listening on  port: " + server.actualPort());
             } else {
                 LOG.error("Failed to bind!");
+                LOG.error(String.valueOf(res.cause()));
                 System.exit(-1);
             }
         });
@@ -364,16 +386,71 @@ public class Proxy extends AbstractVerticle {
                     .tag("requestState", state.toString())
                     .register(registry).increment();
         }
-        if (!f1.result().equals(f2.result())) {
-            // @Todo: peers will almost always return a different result so fiter some of them out
+
+        // Ignore prepared socne we handle that elsewhere and create a substitution, no need to count that
+        // against us.
+        if (!f1.result().equals(f2.result()) && state != FastDecode.State.prepare) {
+            // Turns out some implementations encode the result differentlty so we need to parse to be sure
+            Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
+            Message m1 = f.message;
+            Message m2 = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result())).message;
+            // @Todo: peers will almost always return a different result so filter some of them out
             //      eventually to give a more realistic metric
-            Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
-                    .tag("requestOpcode", String.valueOf(opcode))
-                    .tag("requestState", state.toString())
-                    .register(registry).increment();
-            LOG.info("Diferent result");
-            LOG.debug("Recieved cassandra server 1: {}", f1.result());
-            LOG.debug("Recieved cassandra server 2: {}",  f2.result());
+
+            if (!m1.equals(m2)) {
+                Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
+                        .tag("requestOpcode", String.valueOf(opcode))
+                        .tag("requestState", state.toString())
+                        .register(registry).increment();
+                LOG.info("Different result");
+                LOG.debug("Recieved cassandra server source: {} ", m1);
+                //LOG.debug("Raw: {}", f1.result());
+                LOG.debug("Recieved cassandra server destination: {} ", m2);
+                //LOG.debug("Raw: {}", f2.result());
+//                if (m1 instanceof Rows && m2 instanceof  Rows) {
+//                    Rows r1 = (Rows)m1;
+//                    Rows r2 = (Rows)m2;
+//                    ColumnSpec cs = r2.getMetadata().columnSpecs.get(0);
+//                    if (cs.ksName != "system" && !r1.getData().isEmpty() && !r2.getData().isEmpty()) {
+//                        LOG.debug("Table: {}", cs.tableName);
+//                        // C* 3.11 won't send the metadata in most cases...
+////                    for (ColumnSpec cs : r1.getMetadata().columnSpecs) {
+////                        LOG.debug("Source ks: {}", cs.ksName);
+////                        LOG.debug("Source row name: {}", cs.name);
+////                        LOG.debug("Source table name: {}", cs.tableName);
+////                        LOG.debug("Source row type: {}", cs.type);
+////                    }
+////                    for (ColumnSpec cs : r2.getMetadata().columnSpecs) {
+////                        LOG.debug("Target ks: {}", cs.ksName);
+////                        LOG.debug("Target row name: {}", cs.name);
+////                        LOG.debug("target table name: {}", cs.tableName);
+////                        LOG.debug("Target row type: {}", cs.type);
+////                    }
+//
+//                        //Comapre first row only
+//                        Iterator<ByteBuffer> bl1 = r1.getData().element().iterator();
+//                        Iterator<ByteBuffer> bl2 = r2.getData().element().iterator();
+//                        while (bl1.hasNext() && bl2.hasNext()) {
+//                            ByteBuffer bb = bl1.next();
+//                            if (bb!= null && bb.remaining()!=0) {
+//                                byte[] arr = new byte[bb.remaining()];
+//                                bb.get(arr);
+//                                LOG.debug("Source: {}", arr);
+//                            }
+//                            ByteBuffer bb2 = bl2.next();
+//                            if( bb2 != null && bb2.remaining() != 0) {
+//                                byte[] arr2 = new byte[bb2.remaining()];
+//                                bb2.get(arr2);
+//                                LOG.debug("Source: {}", arr2);
+//                            }
+//                        }
+//                    }
+//
+//
+//                }
+            } else {
+                LOG.debug("Parsed value was the same but source {} dest {}", f1.result(), f2.result());
+            }
         }
         Timer.builder("cassandraProxy.cqlOperation.proxyTime")
                 .tag("requestOpcode", String.valueOf(opcode))

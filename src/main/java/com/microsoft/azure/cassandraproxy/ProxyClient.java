@@ -20,7 +20,9 @@ import com.datastax.oss.protocol.internal.Compressor;
 import com.datastax.oss.protocol.internal.Frame;
 import com.datastax.oss.protocol.internal.FrameCodec;
 import com.datastax.oss.protocol.internal.ProtocolConstants;
+import com.datastax.oss.protocol.internal.request.Execute;
 import com.datastax.oss.protocol.internal.response.Supported;
+import com.datastax.oss.protocol.internal.util.Bytes;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.vertx.core.*;
@@ -29,11 +31,9 @@ import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.NetClientOptions;
 import io.vertx.micrometer.backends.BackendRegistries;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +57,10 @@ public class ProxyClient  {
     // Map to hold the requests so we can assign out of order responses
     // to the right request Promise
     private Map<Short, Promise> results = new ConcurrentHashMap<>();
+    // Prepare statemtns are identified by the md5 hash of the query string
+    // Some implementations calculate md5 differently and so we need to keep track of them
+    // Prepared statements are only cached for the duration of a session (@TODO: Confirm)
+    private Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
 
 
     public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, boolean metrics, boolean wait) {
@@ -117,6 +121,21 @@ public class ProxyClient  {
     }
 
     private void write(Buffer buffer) {
+        // Do we need to substitute the quwryId ?
+        if ((serverSocket == null) && (buffer.getByte(4) == ProtocolConstants.Opcode.EXECUTE) && !this.prepareSubstitution.isEmpty()) {
+            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+            Frame f = serverCodec.decode(buffer2);
+            Execute execute = (Execute) f.message;
+            LOG.debug("Need to substitute prepared query id {}", execute.queryId);
+            if (prepareSubstitution.containsKey(Bytes.toHexString(execute.queryId))) {
+                Execute newExecute = new Execute(prepareSubstitution.get(Bytes.toHexString(execute.queryId)), execute.resultMetadataId, execute.options);
+                LOG.debug("Substituting {} for {}", execute, newExecute);
+                Frame r = Frame.forRequest(f.protocolVersion, f.streamId, f.tracing, f.customPayload, newExecute);
+                buffer = clientCodec.encode(r).buffer;
+            } else {
+                LOG.debug("QueryId not found in {}", prepareSubstitution);
+            }
+        }
         socket.write(buffer);
         if (socket.writeQueueFull()) {
             LOG.warn("{} Write Queue full!", identifier);
@@ -211,6 +230,10 @@ public class ProxyClient  {
         } else {
             LOG.warn ("Stream Id {} no registered. Are you using TLS on a non TLS connection?", streamId);
         }
+    }
+
+    public void addPrepareSubstitution(byte[] orig, byte[] target) {
+        this.prepareSubstitution.put(Bytes.toHexString(orig), target);
     }
 
 }
