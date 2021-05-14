@@ -57,6 +57,7 @@ public class Proxy extends AbstractVerticle {
     private FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
     private FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
     private final UUIDGenWrapper uuidGenWrapper;
+    private Credential credential;
 
 
     public Proxy() {
@@ -166,7 +167,13 @@ public class Proxy extends AbstractVerticle {
                         .setDescription("Port number the promethwus metrics are available")
                         .setLongName("metrics-port")
                         .setShortName("mp")
-                        .setDefaultValue("28000"));
+                        .setDefaultValue("28000"))
+                .addOption(new Option()
+                        .setDescription("Target username if different credential from source. The system will use this user/pwd instead.")
+                        .setLongName("target-username"))
+                .addOption(new Option()
+                        .setDescription("Target password if different credential from source. The system will use this user/pwd instead.")
+                        .setLongName("target-password"));
 
         // TODO: Add trust store, client certs, etc.
 
@@ -185,7 +192,11 @@ public class Proxy extends AbstractVerticle {
         }
 
         for (Option o : cli.getOptions()) {
-            LOG.info(o.getName() + " : " + commandLine.getOptionValue(o.getName()));
+            if (o.getName().contains("password")) {
+                LOG.info(o.getName() + " : " + "***");
+            } else {
+                LOG.info(o.getName() + " : " + commandLine.getOptionValue(o.getName()));
+            }
         }
 
         for (Argument a : cli.getArguments()) {
@@ -233,6 +244,16 @@ public class Proxy extends AbstractVerticle {
             System.exit(-1);
         }
 
+        String username = commandLine.getOptionValue("target-username");
+        String password = commandLine.getOptionValue("target-password");
+        if (username!=null && username.length()>0 && password != null && password.length()>0) {
+            credential = new Credential(username, password);
+        } else if ((username!=null && username.length()>0 ) || password != null && password.length()>0) {
+            System.out.println("Both target-username and target-password need to be set if you have different accounts on the target system");
+            LOG.error("Both target-username and target-password need to be set if you have different accounts on the target system");
+            System.exit(-1);
+        }
+
         List<String> protocolVersions = new ArrayList<>();
         if (commandLine.getOptionValues(PROTOCOL_VERSION) != null) {
             for (Object protocolVersion : commandLine.getOptionValues(PROTOCOL_VERSION)) {
@@ -243,9 +264,9 @@ public class Proxy extends AbstractVerticle {
         NetServer server = vertx.createNetServer(options);
 
         server.connectHandler(socket -> {
-            ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"));
+            ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"), null);
             Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"));
-            ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"));
+            ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"), credential);
             Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"));
             LOG.info("Connection to both Cassandra servers up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {

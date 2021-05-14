@@ -20,6 +20,7 @@ import com.datastax.oss.protocol.internal.Compressor;
 import com.datastax.oss.protocol.internal.Frame;
 import com.datastax.oss.protocol.internal.FrameCodec;
 import com.datastax.oss.protocol.internal.ProtocolConstants;
+import com.datastax.oss.protocol.internal.request.AuthResponse;
 import com.datastax.oss.protocol.internal.request.Execute;
 import com.datastax.oss.protocol.internal.response.Supported;
 import com.datastax.oss.protocol.internal.util.Bytes;
@@ -50,6 +51,7 @@ public class ProxyClient  {
     private final boolean compressionEnabled;
     private final boolean metrics;
     private final boolean wait;
+    private final Credential credential;
     private NetSocket socket;
     private Promise<Void> socketPromise;
     private Promise<Buffer> bufferPromise = Promise.promise();
@@ -58,13 +60,14 @@ public class ProxyClient  {
     // Map to hold the requests so we can assign out of order responses
     // to the right request Promise
     private Map<Short, Promise> results = new ConcurrentHashMap<>();
-    // Prepare statemtns are identified by the md5 hash of the query string
+    // Prepare statements are identified by the md5 hash of the query string
     // Some implementations calculate md5 differently and so we need to keep track of them
     // Prepared statements are only cached for the duration of a session (@TODO: Confirm)
-    private Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
+    // but we will cache them for the life of the proxy to save memory
+    private static Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
 
 
-    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, List<String> compressions, boolean compressionEnabled, boolean metrics, boolean wait) {
+    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, List<String> compressions, boolean compressionEnabled, boolean metrics, boolean wait, Credential credential) {
         this.identifier = identifier;
         this.serverSocket = socket;
         this.protocolVersions = protocolVersions;
@@ -73,10 +76,11 @@ public class ProxyClient  {
         this.metrics = metrics;
         this.wait = wait;
         this.compressionEnabled = compressionEnabled;
+        this.credential = credential;
     }
 
-    public ProxyClient(String identifier, boolean metrics) {
-        this(identifier, null, null, null, null, true, metrics, true);
+    public ProxyClient(String identifier, boolean metrics, Credential credential) {
+        this(identifier, null, null, null, null, true, metrics, true, credential);
     }
 
     public void pause() {
@@ -138,6 +142,13 @@ public class ProxyClient  {
             } else {
                 LOG.debug("QueryId not found in {}", prepareSubstitution);
             }
+        } else if ((buffer.getByte(4) == ProtocolConstants.Opcode.AUTH_RESPONSE) && credential !=null) {
+            LOG.debug("Changing Auth");
+            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+            Frame f = serverCodec.decode(buffer2);
+            Frame r = Frame.forRequest(f.protocolVersion, f.streamId, f.tracing, f.customPayload, credential.replaceAuthentication((AuthResponse) f.message));
+            buffer = clientCodec.encode(r).buffer;
+
         }
         socket.write(buffer);
         if (socket.writeQueueFull()) {
