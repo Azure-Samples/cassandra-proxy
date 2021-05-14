@@ -30,6 +30,7 @@ import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
 import io.vertx.core.http.HttpServerOptions;
+import io.vertx.core.net.JksOptions;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.PemKeyCertOptions;
@@ -123,6 +124,10 @@ public class Proxy extends AbstractVerticle {
                 .addOption(new Option()
                         .setDescription("Jks containing the key for the proxy to perform TLS encryption. If not set, no encryption ")
                         .setLongName("proxy-jks-file"))
+                .addOption(new Option()
+                        .setDescription("Password for the Jks store specified (Default: changeit)")
+                        .setLongName("proxy-jks-password")
+                        .setDefaultValue("changeit"))
                 .addOption(new TypedOption<Integer>()
                         .setType(Integer.class)
                         .setDescription("How many threads should be launched")
@@ -173,7 +178,17 @@ public class Proxy extends AbstractVerticle {
                         .setLongName("target-username"))
                 .addOption(new Option()
                         .setDescription("Target password if different credential from source. The system will use this user/pwd instead.")
-                        .setLongName("target-password"));
+                        .setLongName("target-password"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("disable-source-tls")
+                        .setDescription("disable tls encryption on the source cluster")
+                        .setDefaultValue("false"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("disable-target-tls")
+                        .setDescription("disable tls encryption on the source cluster")
+                        .setDefaultValue("false"));
 
         // TODO: Add trust store, client certs, etc.
 
@@ -233,7 +248,7 @@ public class Proxy extends AbstractVerticle {
     public void start() throws Exception {
 
         NetServerOptions options = new NetServerOptions().setPort(commandLine.getOptionValue("proxy-port"));
-        if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null) {
+        if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null && commandLine.getOptionValue("proxy-jks-file") == null) {
             PemKeyCertOptions pemOptions = new PemKeyCertOptions();
             pemOptions.addCertPath(commandLine.getOptionValue("proxy-pem-certfile"))
                     .addKeyPath(commandLine.getOptionValue("proxy-pem-keyfile"));
@@ -242,6 +257,15 @@ public class Proxy extends AbstractVerticle {
             System.out.println("Both proxy-pem-keyfile and proxy-pem-certfile need to be set for TLS");
             LOG.error("Both proxy-pem-keyfile and proxy-pem-certfile need to be set for TLS");
             System.exit(-1);
+        } else if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null && commandLine.getOptionValue("proxy-jks-file") != null) {
+            System.out.println("Only proxy-pem-keyfile and proxy-pem-certfile OR proxy-jks-file can to be set for TLS");
+            LOG.error("Only proxy-pem-keyfile and proxy-pem-certfile OR proxy-jks-file can to be set for TLS");
+            System.exit(-1);
+        } else if (commandLine.getOptionValue("proxy-jks-file") != null) {
+            JksOptions jksOptions = new JksOptions();
+            jksOptions.setPath(commandLine.getOptionValue("proxy-jks-file"))
+                    .setPassword(commandLine.getOptionValue("proxy-jks-password"));
+            options.setSsl(true).setKeyStoreOptions(jksOptions);
         }
 
         String username = commandLine.getOptionValue("target-username");
@@ -265,9 +289,9 @@ public class Proxy extends AbstractVerticle {
 
         server.connectHandler(socket -> {
             ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"), null);
-            Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"));
+            Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"), !(Boolean)commandLine.getOptionValue("disable-source-tls"));
             ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"), credential);
-            Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"));
+            Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"),  !(Boolean)commandLine.getOptionValue("disable-target-tls"));
             LOG.info("Connection to both Cassandra servers up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
                 final long startTime = System.nanoTime();

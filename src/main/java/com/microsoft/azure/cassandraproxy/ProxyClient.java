@@ -91,13 +91,14 @@ public class ProxyClient  {
         fastDecode.resume();
     }
 
-    public Future<Void> start(Vertx vertx,String host, int port)
+    public Future<Void> start(Vertx vertx,String host, int port, boolean ssl)
     {
         socketPromise = Promise.promise();
         // @TODO: Allow for truststore, etc,
-        NetClientOptions options = new NetClientOptions().
-                setSsl(true).
-                setTrustAll(true);
+        NetClientOptions options = new NetClientOptions();
+        if (ssl) {
+            options.setSsl(true).setTrustAll(true);
+        }
         vertx.createNetClient(options).connect(port, host, res-> {
             if (res.succeeded()) {
                 LOG.info("Server connected");

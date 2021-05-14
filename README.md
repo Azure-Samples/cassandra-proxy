@@ -63,9 +63,11 @@ The pause metrics also include a server or client address and int he case of the
 2. Use any offline migration, e.g. Spark, sstableloader, or other.
 3. TBD: Retrive read reports from proxy and see how close the results are
 
-
-
-* Can't diable TLS for the backend C* servers
+## Known Issues
+* The data centers need to be named the same  (which is an issue with loadbalancing clients beginning 4.0)
+  * This is especially difficult for schema changes
+* Metrics are WIP - we noticed that some C* versions/implementations pad results differently
+* TLS on the backend servers doesn't do hostname validation not client certs nor...
 ## Resources
 
 TBD
