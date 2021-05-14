@@ -20,7 +20,10 @@ import com.datastax.oss.protocol.internal.Compressor;
 import com.datastax.oss.protocol.internal.Frame;
 import com.datastax.oss.protocol.internal.FrameCodec;
 import com.datastax.oss.protocol.internal.ProtocolConstants;
+import com.datastax.oss.protocol.internal.request.AuthResponse;
+import com.datastax.oss.protocol.internal.request.Execute;
 import com.datastax.oss.protocol.internal.response.Supported;
+import com.datastax.oss.protocol.internal.util.Bytes;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.vertx.core.*;
@@ -29,26 +32,26 @@ import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.NetClientOptions;
 import io.vertx.micrometer.backends.BackendRegistries;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class ProxyClient  {
     private static final Logger LOG = LoggerFactory.getLogger(ProxyClient.class);
-    private static final int CASSANDRA_PROTOCOL_VERSION = ProtocolConstants.Version.V3;
     private static final BufferCodec bufferCodec = new BufferCodec();
     private static final FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
     private static final FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
     private final String identifier;
     private final List<String> protocolVersions;
     private final List<String> cqlVersions;
+    private final List<String> compressions;
+    private final boolean compressionEnabled;
     private final boolean metrics;
     private final boolean wait;
+    private final Credential credential;
     private NetSocket socket;
     private Promise<Void> socketPromise;
     private Promise<Buffer> bufferPromise = Promise.promise();
@@ -57,19 +60,27 @@ public class ProxyClient  {
     // Map to hold the requests so we can assign out of order responses
     // to the right request Promise
     private Map<Short, Promise> results = new ConcurrentHashMap<>();
+    // Prepare statements are identified by the md5 hash of the query string
+    // Some implementations calculate md5 differently and so we need to keep track of them
+    // Prepared statements are only cached for the duration of a session (@TODO: Confirm)
+    // but we will cache them for the life of the proxy to save memory
+    private static Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
 
 
-    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, boolean metrics, boolean wait) {
+    public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, List<String> compressions, boolean compressionEnabled, boolean metrics, boolean wait, Credential credential) {
         this.identifier = identifier;
         this.serverSocket = socket;
         this.protocolVersions = protocolVersions;
         this.cqlVersions = cqlVersions;
+        this.compressions = compressions;
         this.metrics = metrics;
         this.wait = wait;
+        this.compressionEnabled = compressionEnabled;
+        this.credential = credential;
     }
 
-    public ProxyClient(String identifier, boolean metrics) {
-        this(identifier, null, null, null, metrics, true);
+    public ProxyClient(String identifier, boolean metrics, Credential credential) {
+        this(identifier, null, null, null, null, true, metrics, true, credential);
     }
 
     public void pause() {
@@ -80,13 +91,14 @@ public class ProxyClient  {
         fastDecode.resume();
     }
 
-    public Future<Void> start(Vertx vertx,String host, int port)
+    public Future<Void> start(Vertx vertx,String host, int port, boolean ssl)
     {
         socketPromise = Promise.promise();
         // @TODO: Allow for truststore, etc,
-        NetClientOptions options = new NetClientOptions().
-                setSsl(true).
-                setTrustAll(true);
+        NetClientOptions options = new NetClientOptions();
+        if (ssl) {
+            options.setSsl(true).setTrustAll(true);
+        }
         vertx.createNetClient(options).connect(port, host, res-> {
             if (res.succeeded()) {
                 LOG.info("Server connected");
@@ -117,6 +129,28 @@ public class ProxyClient  {
     }
 
     private void write(Buffer buffer) {
+        // Do we need to substitute the quwryId ?
+        if ((serverSocket == null) && (buffer.getByte(4) == ProtocolConstants.Opcode.EXECUTE) && !this.prepareSubstitution.isEmpty()) {
+            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+            Frame f = serverCodec.decode(buffer2);
+            Execute execute = (Execute) f.message;
+            LOG.debug("Need to substitute prepared query id {}", execute.queryId);
+            if (prepareSubstitution.containsKey(Bytes.toHexString(execute.queryId))) {
+                Execute newExecute = new Execute(prepareSubstitution.get(Bytes.toHexString(execute.queryId)), execute.resultMetadataId, execute.options);
+                LOG.debug("Substituting {} for {}", execute, newExecute);
+                Frame r = Frame.forRequest(f.protocolVersion, f.streamId, f.tracing, f.customPayload, newExecute);
+                buffer = clientCodec.encode(r).buffer;
+            } else {
+                LOG.debug("QueryId not found in {}", prepareSubstitution);
+            }
+        } else if ((buffer.getByte(4) == ProtocolConstants.Opcode.AUTH_RESPONSE) && credential !=null) {
+            LOG.debug("Changing Auth");
+            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+            Frame f = serverCodec.decode(buffer2);
+            Frame r = Frame.forRequest(f.protocolVersion, f.streamId, f.tracing, f.customPayload, credential.replaceAuthentication((AuthResponse) f.message));
+            buffer = clientCodec.encode(r).buffer;
+
+        }
         socket.write(buffer);
         if (socket.writeQueueFull()) {
             LOG.warn("{} Write Queue full!", identifier);
@@ -144,7 +178,7 @@ public class ProxyClient  {
     {
             FastDecode.State state = fastDecode.quickLook(buffer);
             // Handle Supported
-            if ((serverSocket != null) && (state == FastDecode.State.supported) && (!protocolVersions.isEmpty() || !cqlVersions.isEmpty())) {
+            if ((serverSocket != null) && (state == FastDecode.State.supported) && (!protocolVersions.isEmpty() || !cqlVersions.isEmpty() || !compressions.isEmpty())) {
                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
                 Frame r = clientCodec.decode(buffer2);
                 Supported supported = (Supported) r.message;
@@ -156,6 +190,12 @@ public class ProxyClient  {
                 }
                 if ((cqlVersions !=null) && (!cqlVersions.isEmpty())) {
                     options.put("CQL_VERSION", cqlVersions);
+                }
+                if ((compressions !=null) && (!compressions.isEmpty())) {
+                    options.put("COMPRESSION", compressions);
+                }
+                if (!compressionEnabled) {
+                    options.put("COMPRESSION", Collections.EMPTY_LIST);
                 }
                 supported = new Supported(options);
                 LOG.info("Sending to Client {} : {}", identifier, supported);
@@ -211,6 +251,10 @@ public class ProxyClient  {
         } else {
             LOG.warn ("Stream Id {} no registered. Are you using TLS on a non TLS connection?", streamId);
         }
+    }
+
+    public void addPrepareSubstitution(byte[] orig, byte[] target) {
+        this.prepareSubstitution.put(Bytes.toHexString(orig), target);
     }
 
 }

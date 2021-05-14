@@ -237,6 +237,27 @@ public class FastDecode implements ReadStream<Buffer>, Handler<Buffer>
         return State.analyze;
     }
 
+    public static byte[] getMessage(Buffer buffer, boolean onlyMessage) {
+        int offset = 9;
+        if (onlyMessage) {
+            int flags = buffer.getByte(1);
+
+            if (Flags.contains(flags, 4)) {
+                // skip custom payload
+                int size = buffer.getUnsignedShort(offset);
+                offset = offset +2;
+                for (int i = 0; i < size*2; ++i) {
+                    offset = buffer.getUnsignedShort(offset) + offset + 2;
+                }
+            }
+            if (Flags.contains(flags, 8)) {
+                // skip custom payload
+                offset = buffer.getUnsignedShort(offset) + offset + 2;
+            }
+        }
+        return buffer.getBytes(offset, buffer.length());
+    }
+
     public FastDecode endHandler(Handler<Void> handler) {
         endHandler = handler;
         return this;

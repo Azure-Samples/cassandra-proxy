@@ -20,12 +20,17 @@ import com.datastax.oss.protocol.internal.*;
 import com.datastax.oss.protocol.internal.request.Batch;
 import com.datastax.oss.protocol.internal.request.Query;
 import com.datastax.oss.protocol.internal.response.Error;
+import com.datastax.oss.protocol.internal.response.Result;
+import com.datastax.oss.protocol.internal.response.result.ColumnSpec;
+import com.datastax.oss.protocol.internal.response.result.Prepared;
+import com.datastax.oss.protocol.internal.response.result.Rows;
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.Timer;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
 import io.vertx.core.http.HttpServerOptions;
+import io.vertx.core.net.JksOptions;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
 import io.vertx.core.net.PemKeyCertOptions;
@@ -53,6 +58,7 @@ public class Proxy extends AbstractVerticle {
     private FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
     private FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
     private final UUIDGenWrapper uuidGenWrapper;
+    private Credential credential;
 
 
     public Proxy() {
@@ -76,7 +82,6 @@ public class Proxy extends AbstractVerticle {
                         .setLongName("wait")
                         .setShortName("W")
                         .setDescription("wait for write completed on both clusters")
-                        .setFlag(true)
                         .setDefaultValue("true"))
                 .addArgument(new Argument()
                         .setDescription("Source cluster. This is the cluster which is authoritative for reads")
@@ -119,6 +124,10 @@ public class Proxy extends AbstractVerticle {
                 .addOption(new Option()
                         .setDescription("Jks containing the key for the proxy to perform TLS encryption. If not set, no encryption ")
                         .setLongName("proxy-jks-file"))
+                .addOption(new Option()
+                        .setDescription("Password for the Jks store specified (Default: changeit)")
+                        .setLongName("proxy-jks-password")
+                        .setDefaultValue("changeit"))
                 .addOption(new TypedOption<Integer>()
                         .setType(Integer.class)
                         .setDescription("How many threads should be launched")
@@ -134,24 +143,52 @@ public class Proxy extends AbstractVerticle {
                         .setDescription("Supported Cassandra CQL Version(s). If not set return what source server says")
                         .setLongName("cql-version")
                         .setMultiValued(true))
+                .addOption(new Option()
+                        .setDescription("Supported Cassandra Compression(s). If not set return what source server says")
+                        .setLongName("compression")
+                        .setMultiValued(true))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("compression-enabled")
+                        .setDescription("If set, cassandra's compression is disabled")
+                        .setDefaultValue("true"))
                 .addOption(new TypedOption<Boolean>()
                         .setType(Boolean.class)
                         .setLongName("uuid")
                         .setDescription("scan for uuid and generate on proxy for inserts/updates")
-                        .setDefaultValue("true")
-                        .setFlag(true))
+                        .setDefaultValue("true"))
                 .addOption(new TypedOption<Boolean>()
                         .setType(Boolean.class)
                         .setLongName("metrics")
                         .setDescription("provide metrics and start metrics server")
-                        .setDefaultValue("true")
-                        .setFlag(true))
+                        .setDefaultValue("true"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("only-message")
+                        .setDescription("some C* APPIs will add payloads and warnings to each request (e.g. charges). Setting this to true will only consider the message for cqlDifferentResultCount metric ")
+                        .setDefaultValue("true"))
                 .addOption(new TypedOption<Integer>()
                         .setType(Integer.class)
                         .setDescription("Port number the promethwus metrics are available")
                         .setLongName("metrics-port")
                         .setShortName("mp")
-                        .setDefaultValue("28000"));
+                        .setDefaultValue("28000"))
+                .addOption(new Option()
+                        .setDescription("Target username if different credential from source. The system will use this user/pwd instead.")
+                        .setLongName("target-username"))
+                .addOption(new Option()
+                        .setDescription("Target password if different credential from source. The system will use this user/pwd instead.")
+                        .setLongName("target-password"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("disable-source-tls")
+                        .setDescription("disable tls encryption on the source cluster")
+                        .setDefaultValue("false"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("disable-target-tls")
+                        .setDescription("disable tls encryption on the source cluster")
+                        .setDefaultValue("false"));
 
         // TODO: Add trust store, client certs, etc.
 
@@ -170,7 +207,11 @@ public class Proxy extends AbstractVerticle {
         }
 
         for (Option o : cli.getOptions()) {
-            LOG.info(o.getName() + " : " + commandLine.getOptionValue(o.getName()));
+            if (o.getName().contains("password")) {
+                LOG.info(o.getName() + " : " + "***");
+            } else {
+                LOG.info(o.getName() + " : " + commandLine.getOptionValue(o.getName()));
+            }
         }
 
         for (Argument a : cli.getArguments()) {
@@ -207,14 +248,33 @@ public class Proxy extends AbstractVerticle {
     public void start() throws Exception {
 
         NetServerOptions options = new NetServerOptions().setPort(commandLine.getOptionValue("proxy-port"));
-        if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null) {
+        if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null && commandLine.getOptionValue("proxy-jks-file") == null) {
             PemKeyCertOptions pemOptions = new PemKeyCertOptions();
-            pemOptions.addCertPath(commandLine.getOptionValue("proxy-pem-keyfile"))
-                    .addKeyPath(commandLine.getOptionValue("proxy-pem-certfile"));
+            pemOptions.addCertPath(commandLine.getOptionValue("proxy-pem-certfile"))
+                    .addKeyPath(commandLine.getOptionValue("proxy-pem-keyfile"));
             options.setSsl(true).setPemKeyCertOptions(pemOptions);
         } else if (commandLine.getOptionValue("proxy-pem-keyfile") != null || commandLine.getOptionValue("proxy-pem-certfile") != null) {
             System.out.println("Both proxy-pem-keyfile and proxy-pem-certfile need to be set for TLS");
             LOG.error("Both proxy-pem-keyfile and proxy-pem-certfile need to be set for TLS");
+            System.exit(-1);
+        } else if (commandLine.getOptionValue("proxy-pem-keyfile") != null && commandLine.getOptionValue("proxy-pem-certfile") != null && commandLine.getOptionValue("proxy-jks-file") != null) {
+            System.out.println("Only proxy-pem-keyfile and proxy-pem-certfile OR proxy-jks-file can to be set for TLS");
+            LOG.error("Only proxy-pem-keyfile and proxy-pem-certfile OR proxy-jks-file can to be set for TLS");
+            System.exit(-1);
+        } else if (commandLine.getOptionValue("proxy-jks-file") != null) {
+            JksOptions jksOptions = new JksOptions();
+            jksOptions.setPath(commandLine.getOptionValue("proxy-jks-file"))
+                    .setPassword(commandLine.getOptionValue("proxy-jks-password"));
+            options.setSsl(true).setKeyStoreOptions(jksOptions);
+        }
+
+        String username = commandLine.getOptionValue("target-username");
+        String password = commandLine.getOptionValue("target-password");
+        if (username!=null && username.length()>0 && password != null && password.length()>0) {
+            credential = new Credential(username, password);
+        } else if ((username!=null && username.length()>0 ) || password != null && password.length()>0) {
+            System.out.println("Both target-username and target-password need to be set if you have different accounts on the target system");
+            LOG.error("Both target-username and target-password need to be set if you have different accounts on the target system");
             System.exit(-1);
         }
 
@@ -228,10 +288,10 @@ public class Proxy extends AbstractVerticle {
         NetServer server = vertx.createNetServer(options);
 
         server.connectHandler(socket -> {
-            ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"));
-            Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"));
-            ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"));
-            Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"));
+            ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"), null);
+            Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"), !(Boolean)commandLine.getOptionValue("disable-source-tls"));
+            ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"), credential);
+            Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"),  !(Boolean)commandLine.getOptionValue("disable-target-tls"));
             LOG.info("Connection to both Cassandra servers up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
                 final long startTime = System.nanoTime();
@@ -263,6 +323,23 @@ public class Proxy extends AbstractVerticle {
                 Future<Buffer> f2 = client2.writeToServer(buffer).future();
                 CompositeFuture.all(f1, f2).onComplete(e -> {
                     Buffer buf = f1.result();
+                    if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
+                        // check if we need to substitute
+                        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                        Frame r1 = clientCodec.decode(buffer2);
+                        buffer2= BufferCodec.createPrimitiveBuffer(f2.result());
+                        Frame r2 = clientCodec.decode(buffer2);
+                        if ((r1.message instanceof Prepared) && (r2.message instanceof Prepared)) {
+                            Prepared res1 = (Prepared) r1.message;
+                            Prepared res2 = (Prepared) r2.message;
+                            if (res1.preparedQueryId != res2.preparedQueryId) {
+                                LOG.info("md5 of prepared statements differ between source and target -- need to substitute");
+                                client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
+                                LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
+                            }
+                        }
+                    }
+
                     if ((Boolean)commandLine.getOptionValue("metrics")) {
                         sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
                     }
@@ -282,6 +359,7 @@ public class Proxy extends AbstractVerticle {
                 LOG.info("Server is now listening on  port: " + server.actualPort());
             } else {
                 LOG.error("Failed to bind!");
+                LOG.error(String.valueOf(res.cause()));
                 System.exit(-1);
             }
         });
@@ -364,16 +442,27 @@ public class Proxy extends AbstractVerticle {
                     .tag("requestState", state.toString())
                     .register(registry).increment();
         }
-        if (!f1.result().equals(f2.result())) {
-            // @Todo: peers will almost always return a different result so fiter some of them out
-            //      eventually to give a more realistic metric
+
+        // Ignore prepared socne we handle that elsewhere and create a substitution, no need to count that
+        // against us.
+        if (state != FastDecode.State.prepare
+                && !FastDecode.getMessage(f1.result(), ((Boolean)commandLine.getOptionValue("only-message"))).equals(FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")))) {
+            // Turns out some implementations encode the result differentlty so we need to parse to be sure
+            Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
+            Message m1 = f.message;
+            Frame ff = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result()));
+            Message m2 = ff.message;
+            // .equals is often using Object.equals which is no good
+            //if (!m1.toString().equals(m2.toString())) {
             Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
                     .tag("requestOpcode", String.valueOf(opcode))
                     .tag("requestState", state.toString())
                     .register(registry).increment();
-            LOG.info("Diferent result");
-            LOG.debug("Recieved cassandra server 1: {}", f1.result());
-            LOG.debug("Recieved cassandra server 2: {}",  f2.result());
+            LOG.info("Different result");
+            LOG.debug("Recieved cassandra server source: {} ", m1);
+            LOG.debug("Raw: {}", FastDecode.getMessage(f1.result(), (Boolean)commandLine.getOptionValue("only-message")));
+            LOG.debug("Recieved cassandra server destination: {} ", m2);
+            LOG.debug("Raw: {}", FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")));
         }
         Timer.builder("cassandraProxy.cqlOperation.proxyTime")
                 .tag("requestOpcode", String.valueOf(opcode))
