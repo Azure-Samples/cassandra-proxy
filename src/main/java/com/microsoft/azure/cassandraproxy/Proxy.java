@@ -447,22 +447,26 @@ public class Proxy extends AbstractVerticle {
         // against us.
         if (state != FastDecode.State.prepare
                 && !FastDecode.getMessage(f1.result(), ((Boolean)commandLine.getOptionValue("only-message"))).equals(FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")))) {
-            // Turns out some implementations encode the result differentlty so we need to parse to be sure
-            Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
-            Message m1 = f.message;
-            Frame ff = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result()));
-            Message m2 = ff.message;
-            // .equals is often using Object.equals which is no good
-            //if (!m1.toString().equals(m2.toString())) {
-            Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
-                    .tag("requestOpcode", String.valueOf(opcode))
-                    .tag("requestState", state.toString())
-                    .register(registry).increment();
-            LOG.info("Different result");
-            LOG.debug("Recieved cassandra server source: {} ", m1);
-            LOG.debug("Raw: {}", FastDecode.getMessage(f1.result(), (Boolean)commandLine.getOptionValue("only-message")));
-            LOG.debug("Recieved cassandra server destination: {} ", m2);
-            LOG.debug("Raw: {}", FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")));
+            try {
+                // Turns out some implementations encode the result differentlty so we need to parse to be sure
+                Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
+                Message m1 = f.message;
+                Frame ff = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result()));
+                Message m2 = ff.message;
+                // .equals is often using Object.equals which is no good
+                //if (!m1.toString().equals(m2.toString())) {
+                Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
+                        .tag("requestOpcode", String.valueOf(opcode))
+                        .tag("requestState", state.toString())
+                        .register(registry).increment();
+                LOG.info("Different result");
+                LOG.debug("Recieved cassandra server source: {} ", m1);
+                LOG.debug("Raw: {}", FastDecode.getMessage(f1.result(), (Boolean) commandLine.getOptionValue("only-message")));
+                LOG.debug("Recieved cassandra server destination: {} ", m2);
+                LOG.debug("Raw: {}", FastDecode.getMessage(f2.result(), (Boolean) commandLine.getOptionValue("only-message")));
+            } catch (Exception e) {
+                LOG.warn("Exception decoding message: ", e);
+            }
         }
         Timer.builder("cassandraProxy.cqlOperation.proxyTime")
                 .tag("requestOpcode", String.valueOf(opcode))
