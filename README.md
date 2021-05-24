@@ -53,9 +53,8 @@ The pause metrics also include a server or client address and int he case of the
 
 ## Future Plans
 * Read Reports
-* Force protocol downgrades
 * More robust TLS
-  
+* better docs
 * ...
 
 ## Migration 
@@ -67,7 +66,9 @@ The pause metrics also include a server or client address and int he case of the
 * The data centers need to be named the same  (which is an issue with loadbalancing clients beginning 4.0)
   * This is especially difficult for schema changes
 * Metrics are WIP - we noticed that some C* versions/implementations pad results differently
-* TLS on the backend servers doesn't do hostname validation not client certs nor...
+* TLS on the backend servers doesn't do hostname validation nor client certs nor...
+* Proxy needs to run on the same host as the source cassandra if errors and crazyness needs to be avoided
+
 ## Resources
 
 TBD

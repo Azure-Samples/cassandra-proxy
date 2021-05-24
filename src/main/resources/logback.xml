@@ -7,12 +7,15 @@
             <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
+    <appender name="ASYNC-VERSION-APPENDER" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="STDOUT"/>
+    </appender>
 
     <logger name="io.netty" level="WARN"/>
     <logger name="io.micrometer" level="WARN"/>
     <logger name="io.vertx" level="INFO"/>
 
     <root level="debug">
-        <appender-ref ref="STDOUT" />
+        <appender-ref ref="ASYNC-VERSION-APPENDER" />
     </root>
 </configuration>
