@@ -257,4 +257,8 @@ public class ProxyClient  {
         this.prepareSubstitution.put(Bytes.toHexString(orig), target);
     }
 
+    public void close() {
+        this.socket.close();
+    }
+
 }

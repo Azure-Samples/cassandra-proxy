@@ -173,6 +173,11 @@ public class Proxy extends AbstractVerticle {
                         .setLongName("metrics-port")
                         .setShortName("mp")
                         .setDefaultValue("28000"))
+                .addOption(new TypedOption<Integer>()
+                        .setType(Integer.class)
+                        .setDescription("TCP Idle Time Out in s (0 for infinite)")
+                        .setLongName("tcp-idle-time-out")
+                        .setDefaultValue("0"))
                 .addOption(new Option()
                         .setDescription("Target username if different credential from source. The system will use this user/pwd instead.")
                         .setLongName("target-username"))
@@ -285,6 +290,10 @@ public class Proxy extends AbstractVerticle {
             }
         }
 
+        int idleTimeOut = commandLine.getOptionValue("tcp-idle-time-out");
+        options.setIdleTimeout(idleTimeOut);
+        options.setIdleTimeoutUnit(TimeUnit.SECONDS);
+
         NetServer server = vertx.createNetServer(options);
 
         server.connectHandler(socket -> {
@@ -351,6 +360,9 @@ public class Proxy extends AbstractVerticle {
                 });
             });
             fastDecode.endHandler(x -> {
+                // Close client connections
+                client1.close();
+                client2.close();
                 LOG.info("Connection closed!");
             });
 
