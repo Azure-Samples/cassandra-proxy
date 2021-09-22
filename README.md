@@ -5,7 +5,7 @@ A dual write proxy for Cassandra to aid in data migrations.
 ## Features
 
 This proxy handles client connections and forwards them to *two* Cassandra
-Cluster simultaneously. The idea is that writes will be delivered to both
+Clusters simultaneously. The idea is that writes will be delivered to both
 clusters thus allowing migrations without implementing dual write in the
 application.
 
@@ -27,7 +27,7 @@ it is advised to run multiple proxies.
 5. cqlsh  -u user -p password localhost 29042
 
 ## Docker
-If you uncomment the jib plugin in the pom.xml `mvn package` will also create a (local) docker image. To use this run `docker run cosmos.microsoft.com/cassandra-proxy source destination`. You can push it to an adequate registry if needed ona  different server.
+If you uncomment the jib plugin in the pom.xml `mvn package` will also create a (local) docker image. To use this run `docker run cosmos.microsoft.com/cassandra-proxy source destination`. You can push it to an adequate registry if needed on a different server.
 
 ## Monitoring
 The system will log through slf4j/logback and thus allow customization of logs as needed
@@ -40,16 +40,16 @@ The metrics gathered are:
 metric | type | Description
 --- | --- | ---
 cassandraProxy.cqlOperation.proxyTime | nanoseconds | time spend solely for proxy processing
-cassandraProxy.cqlOperation.timer | nanoseconds | time spend for the whole requests (includes waiting for a response from both C* servers)
-cassandraProxy.cqlOperation.cqlServerErrorCount | counter | counts the occurence of error responses from the server and proxy
-cassandraProxy.cqlOperation.cqlDifferentResultCount | counter | counts when the result to the same cql operation differed between the servers
+cassandraProxy.cqlOperation.timer | nanoseconds | time spend for the whole request (includes waiting for a response from both C* servers)
+cassandraProxy.cqlOperation.cqlServerErrorCount | counter | counts the occurrence of error responses from the server and proxy
+cassandraProxy.cqlOperation.cqlDifferentResultCount | counter | counts when the result of the same cql operation differed between the servers
 cassandraProxy.clientSocket.paused | nanoseconds | time we need to pause requests to give the client time to catch up
 cassandraProxy.serverSocket.paused | nanoseconds | time we need to pause requests to give Cassandra time to catch up
 
-Some also contain tags indicating the opcode fromthe CQL protocol and a more readable form
+Some also contain tags indicating the opcode from the CQL protocol and a more readable form
 describing the request (e.g. Query).  
 
-The pause metrics also include a server or client address and int he case of the server a user defined identifier.
+The pause metrics also include a server or client address and in the case of the server a user defined identifier.
 
 ## Future Plans
 * Read Reports
@@ -60,14 +60,14 @@ The pause metrics also include a server or client address and int he case of the
 ## Migration 
 1. Run the proxy
 2. Use any offline migration, e.g. Spark, sstableloader, or other.
-3. TBD: Retrive read reports from proxy and see how close the results are
+3. TBD: Retrieve read reports from proxy and see how close the results are
 
 ## Known Issues
-* The data centers need to be named the same  (which is an issue with loadbalancing clients beginning 4.0)
+* The data centers need to be named the same (which is an issue with loadbalancing clients beginning 4.0)
   * This is especially difficult for schema changes
 * Metrics are WIP - we noticed that some C* versions/implementations pad results differently
 * TLS on the backend servers doesn't do hostname validation nor client certs nor...
-* Proxy needs to run on the same host as the source cassandra if errors and crazyness needs to be avoided
+* Proxy needs to run on the same host as the source Cassandra if errors and crazyness needs to be avoided
 
 ## Resources
 
