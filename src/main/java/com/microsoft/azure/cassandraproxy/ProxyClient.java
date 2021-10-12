@@ -258,7 +258,9 @@ public class ProxyClient  {
     }
 
     public void close() {
-        this.socket.close();
+        if (this.socket != null) {
+            this.socket.close();
+        }
     }
 
 }
