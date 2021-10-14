@@ -16,7 +16,9 @@ it is advised to run multiple proxies.
   a result from the source sever. This obviously can lead to botched migrations if the request
   never reaches the target server for any reason. 
 
-
+## ApacheCon Presentation
+To see it in action watch our ApacheCon presentation:
+[![IMAGE ALT TEXT](https://img.youtube.com/vi/fJIkV44p2Cs/0.jpg)](https://youtu.be/fJIkV44p2Cs "Cassandra Data Migration with Dual Write Proxy - German Eichberger")
 ## Quickstart
 (Add steps to get up and running quickly assuming you have java and maven installed)
 
