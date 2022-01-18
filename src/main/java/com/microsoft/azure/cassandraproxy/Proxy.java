@@ -18,6 +18,8 @@ package com.microsoft.azure.cassandraproxy;
 
 import com.datastax.oss.protocol.internal.*;
 import com.datastax.oss.protocol.internal.request.Batch;
+import com.datastax.oss.protocol.internal.request.Execute;
+import com.datastax.oss.protocol.internal.request.Prepare;
 import com.datastax.oss.protocol.internal.request.Query;
 import com.datastax.oss.protocol.internal.response.Error;
 import com.datastax.oss.protocol.internal.response.Result;
@@ -30,6 +32,7 @@ import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
 import io.vertx.core.http.HttpServerOptions;
+import io.vertx.core.impl.ConcurrentHashSet;
 import io.vertx.core.net.JksOptions;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetServerOptions;
@@ -41,6 +44,9 @@ import io.vertx.micrometer.backends.BackendRegistries;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,6 +65,8 @@ public class Proxy extends AbstractVerticle {
     private FrameCodec<BufferCodec.PrimitiveBuffer> clientCodec = FrameCodec.defaultClient(bufferCodec, Compressor.none());
     private final UUIDGenWrapper uuidGenWrapper;
     private Credential credential;
+    private Pattern pattern;
+    private Set<byte[]> filterPreparedQueries = new ConcurrentHashSet<>();
 
 
     public Proxy() {
@@ -193,7 +201,10 @@ public class Proxy extends AbstractVerticle {
                         .setType(Boolean.class)
                         .setLongName("disable-target-tls")
                         .setDescription("disable tls encryption on the source cluster")
-                        .setDefaultValue("false"));
+                        .setDefaultValue("false"))
+                .addOption(new Option()
+                        .setDescription("Regex of queries to be filtered out and not be forwarded to target, e.g. 'insert into test .*'")
+                        .setLongName("filter-tables"));
 
         // TODO: Add trust store, client certs, etc.
 
@@ -290,6 +301,10 @@ public class Proxy extends AbstractVerticle {
             }
         }
 
+        if (commandLine.getOptionValue("filter-tables") != null) {
+            pattern = Pattern.compile(commandLine.getOptionValue("filter-tables"));
+        }
+
         int idleTimeOut = commandLine.getOptionValue("tcp-idle-time-out");
         options.setIdleTimeout(idleTimeOut);
         options.setIdleTimeoutUnit(TimeUnit.SECONDS);
@@ -327,37 +342,82 @@ public class Proxy extends AbstractVerticle {
                         && scanForUUID(buffer)) {
                     buffer = handleUUID(buffer);
                 }
-                final long endTime = System.nanoTime();
-                Future<Buffer> f1 = client1.writeToServer(buffer).future();
-                Future<Buffer> f2 = client2.writeToServer(buffer).future();
-                CompositeFuture.all(f1, f2).onComplete(e -> {
-                    Buffer buf = f1.result();
-                    if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
-                        // check if we need to substitute
-                        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
-                        Frame r1 = clientCodec.decode(buffer2);
-                        buffer2= BufferCodec.createPrimitiveBuffer(f2.result());
-                        Frame r2 = clientCodec.decode(buffer2);
-                        if ((r1.message instanceof Prepared) && (r2.message instanceof Prepared)) {
-                            Prepared res1 = (Prepared) r1.message;
-                            Prepared res2 = (Prepared) r2.message;
-                            if (res1.preparedQueryId != res2.preparedQueryId) {
-                                LOG.info("md5 of prepared statements differ between source and target -- need to substitute");
-                                client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
-                                LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
-                            }
+                boolean onlySource = false;
+                if (pattern != null
+                        && ((state == FastDecode.State.query) || (state == FastDecode.State.prepare))) {
+                    // we need to filter tables
+                    BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+                    Frame r1 = serverCodec.decode(buffer2);
+                    if (r1.message instanceof Query) {
+                        Query q = (Query) r1.message;
+                        if (pattern.matcher(q.query).matches()) {
+                            onlySource = true;
+                        }
+                    } else if (r1.message instanceof Execute) {
+                        Execute ex = (Execute) r1.message;
+                        // is this a prepared statement for this table
+                        if (filterPreparedQueries.contains(ex.queryId)) {
+                            onlySource = true;
+                        }
+                    } else if (r1.message instanceof Prepare) {
+                        Prepare p = (Prepare) r1.message;
+                        if (pattern.matcher(p.cqlQuery).matches()) {
+                            onlySource = true;
                         }
                     }
+                }
 
-                    if ((Boolean)commandLine.getOptionValue("metrics")) {
-                        sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
-                    }
+                final long endTime = System.nanoTime();
+                Future<Buffer> f1 = client1.writeToServer(buffer).future();
+                if (!onlySource) {
+                    Future<Buffer> f2 = client2.writeToServer(buffer).future();
+                    CompositeFuture.all(f1, f2).onComplete(e -> {
+                        Buffer buf = f1.result();
+                        if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
+                            // check if we need to substitute
+                            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                            Frame r1 = clientCodec.decode(buffer2);
+                            buffer2 = BufferCodec.createPrimitiveBuffer(f2.result());
+                            Frame r2 = clientCodec.decode(buffer2);
+                            if ((r1.message instanceof Prepared) && (r2.message instanceof Prepared)) {
+                                Prepared res1 = (Prepared) r1.message;
+                                Prepared res2 = (Prepared) r2.message;
+                                if (res1.preparedQueryId != res2.preparedQueryId) {
+                                    LOG.info("md5 of prepared statements differ between source and target -- need to substitute");
+                                    client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
+                                    LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
+                                }
+                            }
+                        }
 
-                    if (commandLine.getOptionValue("wait")) {
-                        // we waited for both results - now write to client
-                        writeToClientSocket(socket, client1, client2, buf);
-                    }
-                });
+                        if ((Boolean) commandLine.getOptionValue("metrics")) {
+                            sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
+                        }
+
+                        if (commandLine.getOptionValue("wait")) {
+                            // we waited for both results - now write to client
+                            writeToClientSocket(socket, client1, client2, buf);
+                        }
+                    });
+                } else {
+                    // only run those queries against the source to save roundtrip time
+                    f1.onComplete(e -> {
+                        Buffer buf = f1.result();
+                        // TODO: metrics?
+                        // Add the prepared id to the ones to filter
+                        if (state == FastDecode.State.prepare) {
+                            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                            Frame r1 = clientCodec.decode(buffer2);
+                            if (r1.message instanceof Prepared) {
+                                Prepared res1 = (Prepared) r1.message;
+                                filterPreparedQueries.add(res1.preparedQueryId);
+                            }
+                        }
+                        if (commandLine.getOptionValue("wait")) {
+                            writeToClientSocket(socket, client1, client2, buf);
+                        }
+                    });
+                }
             });
             fastDecode.endHandler(x -> {
                 // Close client connections
