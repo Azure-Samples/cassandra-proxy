@@ -313,116 +313,128 @@ public class Proxy extends AbstractVerticle {
 
         server.connectHandler(socket -> {
             ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"), null);
-            Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"), !(Boolean)commandLine.getOptionValue("disable-source-tls"));
+            Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"), !(Boolean)commandLine.getOptionValue("disable-source-tls"), idleTimeOut);
             ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"), credential);
-            Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"),  !(Boolean)commandLine.getOptionValue("disable-target-tls"));
+            Future c2 = client2.start(vertx, commandLine.getArgumentValue("target"), commandLine.getOptionValue("target-port"),  !(Boolean)commandLine.getOptionValue("disable-target-tls"), idleTimeOut);
             LOG.info("Connection to both Cassandra servers up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
-                final long startTime = System.nanoTime();
-                final int opcode = buffer.getByte(4);
-                FastDecode.State state = FastDecode.quickLook(buffer);
-                // Check if we support the protocol version
-                if (commandLine.getOptionValues(PROTOCOL_VERSION) != null && !commandLine.getOptionValues(PROTOCOL_VERSION).isEmpty()) {
-                    int protocolVersion = buffer.getByte(0) & 0b0111_1111;
-                    if (!isProtocolSupported(protocolVersion)) {
-                        LOG.info("Downgrading Protocol from {}", protocolVersion);
-                        writeToClientSocket(socket, client1, client2, errorProtocolNotSupported(buffer, startTime, opcode, state, protocolVersion));
-                        return;
-                    }
-                }
-
-                //Todo: Do we need to fake peers? Given that we would need to also come up with tokens that seems
-                // future work when C* is smart enough to deal with multiple C* on the same node but on different ports
-                // right now it will always connect to proxy if we set the proxy port even if there is C* running
-                // on another port.
-
-
-                if ((Boolean) commandLine.getOptionValue("uuid")
-                        && state == FastDecode.State.query
-                        && scanForUUID(buffer)) {
-                    buffer = handleUUID(buffer);
-                }
-                boolean onlySource = false;
-                if (pattern != null
-                        && ((state == FastDecode.State.query) || (state == FastDecode.State.prepare))) {
-                    // we need to filter tables
-                    BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
-                    Frame r1 = serverCodec.decode(buffer2);
-                    if (r1.message instanceof Query) {
-                        Query q = (Query) r1.message;
-                        if (pattern.matcher(q.query).matches()) {
-                            onlySource = true;
-                        }
-                    } else if (r1.message instanceof Execute) {
-                        Execute ex = (Execute) r1.message;
-                        // is this a prepared statement for this table
-                        if (filterPreparedQueries.contains(ex.queryId)) {
-                            onlySource = true;
-                        }
-                    } else if (r1.message instanceof Prepare) {
-                        Prepare p = (Prepare) r1.message;
-                        if (pattern.matcher(p.cqlQuery).matches()) {
-                            onlySource = true;
+                try {
+                    final long startTime = System.nanoTime();
+                    final int opcode = buffer.getByte(4);
+                    FastDecode.State state = FastDecode.quickLook(buffer);
+                    // Check if we support the protocol version
+                    if (commandLine.getOptionValues(PROTOCOL_VERSION) != null && !commandLine.getOptionValues(PROTOCOL_VERSION).isEmpty()) {
+                        int protocolVersion = buffer.getByte(0) & 0b0111_1111;
+                        if (!isProtocolSupported(protocolVersion)) {
+                            LOG.info("Downgrading Protocol from {}", protocolVersion);
+                            writeToClientSocket(socket, client1, client2, errorProtocolNotSupported(buffer, startTime, opcode, state, protocolVersion));
+                            return;
                         }
                     }
-                }
 
-                final long endTime = System.nanoTime();
-                Future<Buffer> f1 = client1.writeToServer(buffer).future();
-                if (!onlySource) {
-                    Future<Buffer> f2 = client2.writeToServer(buffer).future();
-                    CompositeFuture.all(f1, f2).onComplete(e -> {
-                        Buffer buf = f1.result();
-                        if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
-                            // check if we need to substitute
-                            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
-                            Frame r1 = clientCodec.decode(buffer2);
-                            buffer2 = BufferCodec.createPrimitiveBuffer(f2.result());
-                            Frame r2 = clientCodec.decode(buffer2);
-                            if ((r1.message instanceof Prepared) && (r2.message instanceof Prepared)) {
-                                Prepared res1 = (Prepared) r1.message;
-                                Prepared res2 = (Prepared) r2.message;
-                                if (res1.preparedQueryId != res2.preparedQueryId) {
-                                    LOG.info("md5 of prepared statements differ between source and target -- need to substitute");
-                                    client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
-                                    LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
+                    //Todo: Do we need to fake peers? Given that we would need to also come up with tokens that seems
+                    // future work when C* is smart enough to deal with multiple C* on the same node but on different ports
+                    // right now it will always connect to proxy if we set the proxy port even if there is C* running
+                    // on another port.
+
+
+                    if ((Boolean) commandLine.getOptionValue("uuid")
+                            && state == FastDecode.State.query
+                            && scanForUUID(buffer)) {
+                        buffer = handleUUID(buffer);
+                    }
+                    boolean onlySource = false;
+                    if (pattern != null
+                            && ((state == FastDecode.State.query) || (state == FastDecode.State.prepare))) {
+                        // we need to filter tables
+                        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+                        Frame r1 = serverCodec.decode(buffer2);
+                        if (r1.message instanceof Query) {
+                            Query q = (Query) r1.message;
+                            if (pattern.matcher(q.query).matches()) {
+                                onlySource = true;
+                            }
+                        } else if (r1.message instanceof Execute) {
+                            Execute ex = (Execute) r1.message;
+                            // is this a prepared statement for this table
+                            if (filterPreparedQueries.contains(ex.queryId)) {
+                                onlySource = true;
+                            }
+                        } else if (r1.message instanceof Prepare) {
+                            Prepare p = (Prepare) r1.message;
+                            if (pattern.matcher(p.cqlQuery).matches()) {
+                                onlySource = true;
+                            }
+                        }
+                    }
+
+                    final long endTime = System.nanoTime();
+                    Future<Buffer> f1 = client1.writeToServer(buffer).future();
+                    if (!onlySource) {
+                        Future<Buffer> f2 = client2.writeToServer(buffer).future();
+                        CompositeFuture.all(f1, f2).onComplete(e -> {
+                            Buffer buf = f1.result();
+                            if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
+                                // check if we need to substitute
+                                BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                                Frame r1 = clientCodec.decode(buffer2);
+                                buffer2 = BufferCodec.createPrimitiveBuffer(f2.result());
+                                Frame r2 = clientCodec.decode(buffer2);
+                                if ((r1.message instanceof Prepared) && (r2.message instanceof Prepared)) {
+                                    Prepared res1 = (Prepared) r1.message;
+                                    Prepared res2 = (Prepared) r2.message;
+                                    if (res1.preparedQueryId != res2.preparedQueryId) {
+                                        LOG.info("md5 of prepared statements differ between source and target -- need to substitute");
+                                        client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
+                                        LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
+                                    }
                                 }
                             }
-                        }
 
-                        if ((Boolean) commandLine.getOptionValue("metrics")) {
-                            sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
-                        }
-
-                        if (commandLine.getOptionValue("wait")) {
-                            // we waited for both results - now write to client
-                            writeToClientSocket(socket, client1, client2, buf);
-                        }
-                    });
-                } else {
-                    // only run those queries against the source to save roundtrip time
-                    f1.onComplete(e -> {
-                        Buffer buf = f1.result();
-                        // TODO: metrics?
-                        // Add the prepared id to the ones to filter
-                        if (state == FastDecode.State.prepare) {
-                            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
-                            Frame r1 = clientCodec.decode(buffer2);
-                            if (r1.message instanceof Prepared) {
-                                Prepared res1 = (Prepared) r1.message;
-                                filterPreparedQueries.add(res1.preparedQueryId);
+                            if ((Boolean) commandLine.getOptionValue("metrics")) {
+                                sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
                             }
-                        }
-                        if (commandLine.getOptionValue("wait")) {
-                            writeToClientSocket(socket, client1, client2, buf);
-                        }
-                    });
+
+                            if (commandLine.getOptionValue("wait")) {
+                                // we waited for both results - now write to client
+                                writeToClientSocket(socket, client1, client2, buf);
+                            }
+                        });
+                    } else {
+                        // only run those queries against the source to save roundtrip time
+                        f1.onComplete(e -> {
+                            Buffer buf = f1.result();
+                            // TODO: metrics?
+                            // Add the prepared id to the ones to filter
+                            if (state == FastDecode.State.prepare) {
+                                BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                                Frame r1 = clientCodec.decode(buffer2);
+                                if (r1.message instanceof Prepared) {
+                                    Prepared res1 = (Prepared) r1.message;
+                                    filterPreparedQueries.add(res1.preparedQueryId);
+                                }
+                            }
+                            if (commandLine.getOptionValue("wait")) {
+                                writeToClientSocket(socket, client1, client2, buf);
+                            }
+                        });
+                    }
+                } catch (Exception e) {
+                    LOG.error("Exception handling CQL packet.", e);
                 }
             });
             fastDecode.endHandler(x -> {
                 // Close client connections
                 client1.close();
                 client2.close();
+                socket.close();
+                LOG.info("Connection closed!");
+            });
+            fastDecode.exceptionHandler(x -> {
+                // Close client connections
+                client1.close();
+                client2.close();
+                socket.close();
                 LOG.info("Connection closed!");
             });
 
