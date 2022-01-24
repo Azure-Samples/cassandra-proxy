@@ -91,7 +91,7 @@ public class ProxyClient  {
         fastDecode.resume();
     }
 
-    public Future<Void> start(Vertx vertx,String host, int port, boolean ssl)
+    public Future<Void> start(Vertx vertx,String host, int port, boolean ssl, int timeout)
     {
         socketPromise = Promise.promise();
         // @TODO: Allow for truststore, etc,
@@ -99,6 +99,8 @@ public class ProxyClient  {
         if (ssl) {
             options.setSsl(true).setTrustAll(true);
         }
+        options.setIdleTimeout(timeout);
+        options.setIdleTimeoutUnit(TimeUnit.SECONDS);
         vertx.createNetClient(options).connect(port, host, res-> {
             if (res.succeeded()) {
                 LOG.info("Server connected");
