@@ -1,11 +1,15 @@
 package com.microsoft.azure.cassandraproxy;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
 
+import com.datastax.oss.protocol.internal.Compressor;
 import com.datastax.oss.protocol.internal.Frame;
 import com.datastax.oss.protocol.internal.FrameCodec;
+import com.datastax.oss.protocol.internal.ProtocolConstants;
 import com.datastax.oss.protocol.internal.request.Query;
+import com.datastax.oss.protocol.internal.response.Error;
+import com.datastax.oss.protocol.internal.response.error.Unprepared;
 import io.vertx.core.buffer.Buffer;
 import org.junit.Before;
 import org.junit.Test;
@@ -89,6 +93,18 @@ public class ProxyTest {
         verify(mockClientCodec).encode(argumentCaptor.capture());
         Frame g = argumentCaptor.getValue();
         assertEquals("BEGIN BATCH INSERT INTO cycling.cyclist_expenses (cyclist_name, balance) VALUES ('Vera ADRIAN', 0) IF NOT EXISTS;   INSERT INTO cycling.cyclist_expenses (cyclist_name, expense_id, amount, description, paid) VALUES (" + uuid1 +", 1, 7.95, 'Breakfast', false);   APPLY BATCH;", ((Query)g.message).query);
+    }
+
+    @Test
+    public void testCheckUnprepared()
+    {
+        assertFalse(proxy.checkUnpreparedTarget(FastDecode.State.error, null));
+
+        Error error = new Unprepared("Boo", new byte[]{0});
+        Frame f = Frame.forResponse(3, 0, null, Collections.emptyMap(), Collections.emptyList(), error);
+        when(mockClientCodec.decode(any())).thenReturn(f);
+        FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(new BufferCodec(), Compressor.none());
+        assertTrue(proxy.checkUnpreparedTarget(FastDecode.State.query, serverCodec.encode(f).buffer));
     }
 
 

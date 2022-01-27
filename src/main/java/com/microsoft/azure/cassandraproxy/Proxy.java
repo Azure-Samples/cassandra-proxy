@@ -33,10 +33,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.impl.ConcurrentHashSet;
-import io.vertx.core.net.JksOptions;
-import io.vertx.core.net.NetServer;
-import io.vertx.core.net.NetServerOptions;
-import io.vertx.core.net.PemKeyCertOptions;
+import io.vertx.core.net.*;
 import io.vertx.micrometer.MicrometerMetricsOptions;
 import io.vertx.micrometer.VertxPrometheusOptions;
 import io.vertx.micrometer.backends.BackendRegistries;
@@ -44,10 +41,13 @@ import io.vertx.micrometer.backends.BackendRegistries;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import ch.qos.logback.classic.Level;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
@@ -204,7 +204,12 @@ public class Proxy extends AbstractVerticle {
                         .setDefaultValue("false"))
                 .addOption(new Option()
                         .setDescription("Regex of queries to be filtered out and not be forwarded to target, e.g. 'insert into test .*'")
-                        .setLongName("filter-tables"));
+                        .setLongName("filter-tables"))
+                .addOption(new TypedOption<Boolean>()
+                    .setType(Boolean.class)
+                    .setLongName("debug")
+                    .setDescription("enable debug logging")
+                    .setDefaultValue("false"));
 
         // TODO: Add trust store, client certs, etc.
 
@@ -235,6 +240,15 @@ public class Proxy extends AbstractVerticle {
         }
 
         LOG.info("Cassandra Proxy starting...");
+
+        // set log level
+        ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger)LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        if ((Boolean)commandLine.getOptionValue("debug")) {
+            root.setLevel(Level.DEBUG);
+        } else {
+            root.setLevel(Level.WARN);
+        }
+
         VertxOptions options = new VertxOptions();
         //  Micrometer
         if ((Boolean)commandLine.getOptionValue("metrics")) {
@@ -374,6 +388,7 @@ public class Proxy extends AbstractVerticle {
                         Future<Buffer> f2 = client2.writeToServer(buffer).future();
                         CompositeFuture.all(f1, f2).onComplete(e -> {
                             Buffer buf = f1.result();
+
                             if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
                                 // check if we need to substitute
                                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
@@ -396,8 +411,14 @@ public class Proxy extends AbstractVerticle {
                             }
 
                             if (commandLine.getOptionValue("wait")) {
+                                // check if we got an error on the target for a prepared statement
+                                if (checkUnpreparedTarget(state, f2.result())) {
+                                    writeToClientSocket(socket, client1, client2, f2.result());
+                                } else {
+                                    writeToClientSocket(socket, client1, client2, buf);
+                                }
                                 // we waited for both results - now write to client
-                                writeToClientSocket(socket, client1, client2, buf);
+
                             }
                         });
                     } else {
@@ -448,6 +469,21 @@ public class Proxy extends AbstractVerticle {
             }
         });
 
+    }
+
+    protected boolean checkUnpreparedTarget(FastDecode.State state, Buffer buf) {
+        if (state == FastDecode.State.query && FastDecode.quickLook(buf) == FastDecode.State.error) {
+            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+            Frame r1 = clientCodec.decode(buffer2);
+            if (r1.message instanceof Error) {
+                Error error = (Error) r1.message;
+                if (error.code == ProtocolConstants.ErrorCode.UNPREPARED) {
+                    // we got unrprepared from target so g
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private Buffer errorProtocolNotSupported(Buffer buffer, long startTime, int opcode, FastDecode.State state, int protocolVersion) {
