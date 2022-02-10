@@ -53,6 +53,18 @@ describing the request (e.g. Query).
 
 The pause metrics also include a server or client address and in the case of the server a user defined identifier.
 
+## Ghost Proxy
+If you choose to run the proxy on a different host than the source cassandra, you will need to set up
+a substitution for the ips in `system.peers` so the cassandra client can loadbalance beween several proxies
+and does not connect to a source cassandra directly. 
+
+This can be done with `--ghostIps '{"10.25.0.12":"192.168.1.45"}` which will replace the ip of the source cassandra
+`10.25.0.12` with the ip of a proxy running on `192.168.1.45`
+
+This feature can also be leveraged to minimize risk in a migration to quickly switch back and fort between source
+and destination cassandra.
+
+
 ## Future Plans
 * Read Reports
 * More robust TLS
