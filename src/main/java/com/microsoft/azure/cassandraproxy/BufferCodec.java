@@ -17,6 +17,7 @@
 package com.microsoft.azure.cassandraproxy;
 
 import com.datastax.oss.protocol.internal.PrimitiveCodec;
+import io.netty.util.CharsetUtil;
 import io.vertx.core.buffer.Buffer;
 
 import java.net.InetAddress;
@@ -179,14 +180,16 @@ public class BufferCodec implements PrimitiveCodec<BufferCodec.PrimitiveBuffer> 
 
     @Override
     public void writeString(String s, PrimitiveBuffer dest) {
-        writeUnsignedShort(s.length(), dest);
-        dest.buffer.appendString(s);
+        byte[] bytes = s.getBytes(CharsetUtil.UTF_8);
+        writeUnsignedShort(bytes.length, dest);
+        dest.buffer.appendBytes(bytes);
     }
 
     @Override
     public void writeLongString(String s, PrimitiveBuffer dest) {
-        writeInt(s.length(), dest);
-        dest.buffer.appendString(s);
+        byte[] bytes = s.getBytes(CharsetUtil.UTF_8);
+        writeInt(bytes.length, dest);
+        dest.buffer.appendBytes(bytes);
     }
 
     @Override
