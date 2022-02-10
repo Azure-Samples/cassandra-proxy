@@ -22,8 +22,8 @@ import com.datastax.oss.protocol.internal.request.Execute;
 import com.datastax.oss.protocol.internal.request.Prepare;
 import com.datastax.oss.protocol.internal.request.Query;
 import com.datastax.oss.protocol.internal.response.Error;
-import com.datastax.oss.protocol.internal.response.Result;
 import com.datastax.oss.protocol.internal.response.result.ColumnSpec;
+import com.datastax.oss.protocol.internal.response.result.DefaultRows;
 import com.datastax.oss.protocol.internal.response.result.Prepared;
 import com.datastax.oss.protocol.internal.response.result.Rows;
 import io.micrometer.core.instrument.*;
@@ -33,11 +33,15 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.cli.*;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.impl.ConcurrentHashSet;
+import io.vertx.core.json.Json;
+import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.*;
 import io.vertx.micrometer.MicrometerMetricsOptions;
 import io.vertx.micrometer.VertxPrometheusOptions;
 import io.vertx.micrometer.backends.BackendRegistries;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -45,11 +49,8 @@ import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ch.qos.logback.classic.Level;
-import java.util.regex.Matcher;
+
 import java.util.regex.Pattern;
-
-import org.slf4j.LoggerFactory;
-
 
 
 /*-h localhost localhost --proxy-pem-keyfile /home/german/Project/cassandra-proxy/src/main/resources/server.pem --proxy-pem-certfile /home/german/Project/cassandra-proxy/src/main/resources/server.key*/
@@ -59,6 +60,8 @@ public class Proxy extends AbstractVerticle {
     private static final Logger LOG = LoggerFactory.getLogger(Proxy.class);
     public static final String CASSANDRA_SERVER_PORT = "29042";
     public static final String PROTOCOL_VERSION = "protocol-version";
+    private static final String PEERS = "SYSTEM.PEERS";
+    private static final String PEERS_V2 = "SYSTEM.PEERS_V2" ;
     private static CommandLine commandLine;
     private BufferCodec bufferCodec = new BufferCodec();
     private FrameCodec<BufferCodec.PrimitiveBuffer> serverCodec = FrameCodec.defaultServer(bufferCodec, Compressor.none());
@@ -67,6 +70,7 @@ public class Proxy extends AbstractVerticle {
     private Credential credential;
     private Pattern pattern;
     private Set<byte[]> filterPreparedQueries = new ConcurrentHashSet<>();
+    private Map<InetAddress, InetAddress> ghostProxyMap = new HashMap<>();
 
 
     public Proxy() {
@@ -209,7 +213,12 @@ public class Proxy extends AbstractVerticle {
                     .setType(Boolean.class)
                     .setLongName("debug")
                     .setDescription("enable debug logging")
-                    .setDefaultValue("false"));
+                    .setDefaultValue("false"))
+                .addOption(new Option()
+                        .setLongName("ghostIps")
+                        .setDescription("list ips to be replaced, e.g. {\"10.25.0.2\":\"192.168.1.4\",...} "
+                                + " - this will replace the ip in system.peers with the other one in queries to "
+                                + "allow running the proxy on different ips from the source cluster"));
 
         // TODO: Add trust store, client certs, etc.
 
@@ -319,6 +328,24 @@ public class Proxy extends AbstractVerticle {
             pattern = Pattern.compile(commandLine.getOptionValue("filter-tables"));
         }
 
+        // set GhostProxy
+        if (commandLine.getOptionValue("ghostIps") != null) {
+            JsonObject object = null;
+            try {
+                object = new JsonObject((String) commandLine.getOptionValue("ghostIps"));
+            } catch (Exception e) {
+                LOG.error("Error parsing --ghostIps ", e);
+            }
+            for (Map.Entry<String, Object> ips : object) {
+                if (!(ips.getValue() instanceof  String)) {
+                    LOG.error("Can't parse ghotsIp" + object);
+                    System.exit(1);
+                }
+                this.ghostProxyMap.put(InetAddress.getByName(ips.getKey()), InetAddress.getByName((String)ips.getValue()));
+            }
+
+        }
+
         int idleTimeOut = commandLine.getOptionValue("tcp-idle-time-out");
         options.setIdleTimeout(idleTimeOut);
         options.setIdleTimeoutUnit(TimeUnit.SECONDS);
@@ -357,6 +384,9 @@ public class Proxy extends AbstractVerticle {
                             && scanForUUID(buffer)) {
                         buffer = handleUUID(buffer);
                     }
+
+                    boolean ghostProxy =  ghostProxyMap != null && state == FastDecode.State.query && (scanForPeers(buffer) || scanForPeersV2(buffer)) ;
+
                     boolean onlySource = false;
                     if (pattern != null
                             && ((state == FastDecode.State.query) || (state == FastDecode.State.prepare))) {
@@ -404,6 +434,10 @@ public class Proxy extends AbstractVerticle {
                                         LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
                                     }
                                 }
+                            }
+
+                            if (ghostProxy && FastDecode.quickLook(buf) == FastDecode.State.result) {
+                                buf = ghostProxySubstitution(buf);
                             }
 
                             if ((Boolean) commandLine.getOptionValue("metrics")) {
@@ -469,6 +503,64 @@ public class Proxy extends AbstractVerticle {
             }
         });
 
+    }
+
+    // we neeed to substitute the ips in system,peer with our own
+    // TODO: test with system.peers_v2 !!!
+    protected Buffer ghostProxySubstitution(Buffer buf) {
+        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+        Frame r1 = clientCodec.decode(buffer2);
+
+        if (r1.message instanceof Rows) {
+            Rows res = (Rows) r1.message;
+            if ((res.getMetadata().columnCount > 0)
+                    && ("system".equalsIgnoreCase(res.getMetadata().columnSpecs.get(0).ksName))
+                    && ("peers".equalsIgnoreCase(res.getMetadata().columnSpecs.get(0).tableName))) {
+                List<ColumnSpec> columns = res.getMetadata().columnSpecs;
+                Queue<List<ByteBuffer>> q = res.getData();
+                Queue<List<ByteBuffer>> dst = new ArrayDeque<>();
+                for (List<ByteBuffer> row : q) {
+                    List<ByteBuffer> dstRow = new ArrayList<>();
+                    for (int i = 0; i < res.getMetadata().columnCount; i++) {
+                        ColumnSpec spec = columns.get(i);
+                        if ("peer".equalsIgnoreCase(spec.name) || "rpc_address".equalsIgnoreCase(spec.name)) {
+                            ByteBuffer bb = row.get(i);
+                            if (bb == null) {
+                                dstRow.add(bb);
+                                continue;
+                            }
+                            byte[] b = new byte[4];
+                            bb.get(b);
+                            bb.rewind(); //reset to not mess up writing of the results later
+                            try {
+                                InetAddress ip = InetAddress.getByAddress(b);
+                                if (this.ghostProxyMap.containsKey(ip)) {
+                                    InetAddress ip2 = this.ghostProxyMap.get(ip);
+                                    LOG.info("Replacing {} with {}", ip, ip2);
+                                    byte[] bytes = ip2.getAddress();
+                                    dstRow.add(ByteBuffer.wrap(bytes));
+                                } else {
+                                    LOG.error("Ip {} not found in ghost proxy configuration", ip);
+                                    dstRow.add(bb);
+                                }
+                            } catch (UnknownHostException ex) {
+                                ex.printStackTrace();
+                            }
+                        } else {
+                            dstRow.add(row.get(i));
+                        }
+                    }
+                    dst.add(dstRow);
+                }
+                Rows r = new DefaultRows(res.getMetadata(), dst);
+                Frame f = Frame.forResponse(r1.protocolVersion, r1.streamId, r1.tracingId, r1.customPayload, r1.warnings, r);
+                BufferCodec.PrimitiveBuffer b = serverCodec.encode(f);
+                return b.buffer;
+            }
+
+        }
+
+        return buf;
     }
 
     protected boolean checkUnpreparedTarget(FastDecode.State state, Buffer buf) {
@@ -675,6 +767,16 @@ public class Proxy extends AbstractVerticle {
     private boolean scanForUUID(Buffer buffer) {
         String s = buffer.getString(9, buffer.length());
         return s.toUpperCase().contains(UUID) || s.toUpperCase().contains(NOW);
+    }
+
+    private boolean scanForPeers(Buffer buffer) {
+        String s = buffer.getString(9, buffer.length());
+        return s.toUpperCase().contains(PEERS);
+    }
+
+    private boolean scanForPeersV2(Buffer buffer) {
+        String s = buffer.getString(9, buffer.length());
+        return s.toUpperCase().contains(PEERS_V2);
     }
 
 }
