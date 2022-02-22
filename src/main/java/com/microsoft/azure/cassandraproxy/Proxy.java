@@ -385,7 +385,9 @@ public class Proxy extends AbstractVerticle {
                         buffer = handleUUID(buffer);
                     }
 
-                    boolean ghostProxy =  ghostProxyMap != null && state == FastDecode.State.query && (scanForPeers(buffer) || scanForPeersV2(buffer)) ;
+                    boolean ghostProxy =  (!ghostProxyMap.isEmpty())
+
+                            && state == FastDecode.State.query && (scanForPeers(buffer) || scanForPeersV2(buffer)) ;
 
                     boolean onlySource = false;
                     if (pattern != null
