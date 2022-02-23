@@ -214,6 +214,11 @@ public class Proxy extends AbstractVerticle {
                     .setLongName("debug")
                     .setDescription("enable debug logging")
                     .setDefaultValue("false"))
+                .addOption(new TypedOption<Boolean>()
+                        .setType(Boolean.class)
+                        .setLongName("dest-close")
+                        .setDescription("if connection to destination server is lost - close the connection")
+                        .setDefaultValue("false"))
                 .addOption(new Option()
                         .setLongName("ghostIps")
                         .setDescription("list ips to be replaced, e.g. {\"10.25.0.2\":\"192.168.1.4\",...} "
@@ -360,6 +365,13 @@ public class Proxy extends AbstractVerticle {
             LOG.info("Connection to both Cassandra servers up)");
             FastDecode fastDecode = FastDecode.newFixed(socket, buffer -> {
                 try {
+                    if (client1.isClosed() || ((Boolean)commandLine.getOptionValue("dest-close") && client2.isClosed())) {
+                        client1.close();
+                        client2.close();
+                        socket.close();
+                        LOG.info("Connection closed!");
+                        return;
+                    }
                     final long startTime = System.nanoTime();
                     final int opcode = buffer.getByte(4);
                     FastDecode.State state = FastDecode.quickLook(buffer);
@@ -373,11 +385,6 @@ public class Proxy extends AbstractVerticle {
                         }
                     }
 
-                    //Todo: Do we need to fake peers? Given that we would need to also come up with tokens that seems
-                    // future work when C* is smart enough to deal with multiple C* on the same node but on different ports
-                    // right now it will always connect to proxy if we set the proxy port even if there is C* running
-                    // on another port.
-
 
                     if ((Boolean) commandLine.getOptionValue("uuid")
                             && state == FastDecode.State.query
@@ -386,10 +393,13 @@ public class Proxy extends AbstractVerticle {
                     }
 
                     boolean ghostProxy =  (!ghostProxyMap.isEmpty())
-
                             && state == FastDecode.State.query && (scanForPeers(buffer) || scanForPeersV2(buffer)) ;
 
-                    boolean onlySource = false;
+                    boolean onlySource = client2.isClosed(); //only write to source if destination is closed
+                    if (onlySource) {
+                        LOG.error("Destination down - writing only to source!!!");
+                    }
+
                     if (pattern != null
                             && ((state == FastDecode.State.query) || (state == FastDecode.State.prepare))) {
                         // we need to filter tables

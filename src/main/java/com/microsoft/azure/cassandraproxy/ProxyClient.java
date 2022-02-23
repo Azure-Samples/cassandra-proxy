@@ -65,6 +65,7 @@ public class ProxyClient  {
     // Prepared statements are only cached for the duration of a session (@TODO: Confirm)
     // but we will cache them for the life of the proxy to save memory
     private static Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
+    private boolean closed = false;
 
 
     public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, List<String> compressions, boolean compressionEnabled, boolean metrics, boolean wait, Credential credential) {
@@ -106,9 +107,13 @@ public class ProxyClient  {
                 LOG.info("Server connected");
                 socket = res.result();
                 fastDecode = FastDecode.newFixed(socket, b-> clientHandle(b));
-                fastDecode.endHandler(x->{LOG.info("Server connection closed");});
+                fastDecode.endHandler(x->{
+                    this.closed = true;
+                    LOG.info("Server connection closed");
+                });
                 socketPromise.complete();
             }  else {
+                this.closed = true;
                 LOG.error("Couldn't connect to server");
                 socketPromise.fail("Couldn't connect to server");
             }
@@ -263,6 +268,10 @@ public class ProxyClient  {
         if (this.socket != null) {
             this.socket.close();
         }
+    }
+
+    public boolean isClosed() {
+        return closed;
     }
 
 }
