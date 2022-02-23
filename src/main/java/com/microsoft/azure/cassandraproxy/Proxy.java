@@ -368,7 +368,7 @@ public class Proxy extends AbstractVerticle {
                     if (client1.isClosed() || ((Boolean)commandLine.getOptionValue("dest-close") && client2.isClosed())) {
                         client1.close();
                         client2.close();
-                        socket.close();
+                        socket.end();
                         LOG.info("Connection closed!");
                         return;
                     }
@@ -494,14 +494,14 @@ public class Proxy extends AbstractVerticle {
                 // Close client connections
                 client1.close();
                 client2.close();
-                socket.close();
+                socket.end();
                 LOG.info("Connection closed!");
             });
             fastDecode.exceptionHandler(x -> {
                 // Close client connections
                 client1.close();
                 client2.close();
-                socket.close();
+                socket.end();
                 LOG.info("Connection closed!");
             });
 

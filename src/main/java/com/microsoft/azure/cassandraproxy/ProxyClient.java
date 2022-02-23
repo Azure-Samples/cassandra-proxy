@@ -114,7 +114,7 @@ public class ProxyClient  {
                 socketPromise.complete();
             }  else {
                 this.closed = true;
-                LOG.error("Couldn't connect to server");
+                LOG.error(String.format("%s - Couldn't connect to server", this.identifier));
                 socketPromise.fail("Couldn't connect to server");
             }
         });
@@ -266,8 +266,9 @@ public class ProxyClient  {
 
     public void close() {
         if (this.socket != null) {
-            this.socket.close();
+            this.socket.end();
         }
+        closed = true;
     }
 
     public boolean isClosed() {
