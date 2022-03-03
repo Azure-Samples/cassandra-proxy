@@ -187,6 +187,11 @@ public class Proxy extends AbstractVerticle {
                         .setDefaultValue("28000"))
                 .addOption(new TypedOption<Integer>()
                         .setType(Integer.class)
+                        .setDescription("size of write buffer for client. This controls when the system will apply back pressure.")
+                        .setLongName("write-buffer-size")
+                        .setDefaultValue(String.valueOf(64 * 1024)))
+                .addOption(new TypedOption<Integer>()
+                        .setType(Integer.class)
                         .setDescription("TCP Idle Time Out in s (0 for infinite)")
                         .setLongName("tcp-idle-time-out")
                         .setDefaultValue("0"))
@@ -358,6 +363,8 @@ public class Proxy extends AbstractVerticle {
         NetServer server = vertx.createNetServer(options);
 
         server.connectHandler(socket -> {
+            // increase the buffer for back pressure
+            socket.setWriteQueueMaxSize((Integer)commandLine.getOptionValue("write-buffer-size"));
             ProxyClient client1 = new ProxyClient(commandLine.getOptionValue("source-identifier"), socket, protocolVersions, commandLine.getOptionValues("cql-version"), commandLine.getOptionValues("compression"), commandLine.getOptionValue("compression-enabled"),commandLine.getOptionValue("metrics"), commandLine.getOptionValue("wait"), null);
             Future c1 = client1.start(vertx, commandLine.getArgumentValue("source"), commandLine.getOptionValue("source-port"), !(Boolean)commandLine.getOptionValue("disable-source-tls"), idleTimeOut);
             ProxyClient client2 = new ProxyClient(commandLine.getOptionValue("target-identifier"),  (Boolean)commandLine.getOptionValue("metrics"), credential);

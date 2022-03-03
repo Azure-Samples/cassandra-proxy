@@ -255,7 +255,7 @@ public class ProxyClient  {
                 LOG.warn("out of band: {}", buffer);
             }
             results.remove(streamId); // we are done with that
-        } else {
+        } else if (streamId != -1){ //-1 is EVENT
             LOG.warn ("Stream Id {} no registered. Are you using TLS on a non TLS connection?", streamId);
         }
     }
