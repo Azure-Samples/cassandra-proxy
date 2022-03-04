@@ -422,9 +422,13 @@ public class Proxy extends AbstractVerticle {
                                 onlySource = true;
                             }
                         } else if (state == FastDecode.State.query) {
-                            String query = FastDecode.getQuery(buffer);
-                            if (pattern.matcher(query).matches()) {
-                                onlySource = true;
+                            if (buffer.getByte(4) == ProtocolConstants.Opcode.BATCH) {
+                                LOG.warn("Filtering batch is not supported");
+                            } else {
+                                String query = FastDecode.getQuery(buffer);
+                                if (pattern.matcher(query).matches()) {
+                                    onlySource = true;
+                                }
                             }
                         }
                     }
