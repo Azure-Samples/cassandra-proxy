@@ -187,7 +187,7 @@ public class Proxy extends AbstractVerticle {
                         .setDefaultValue("28000"))
                 .addOption(new TypedOption<Integer>()
                         .setType(Integer.class)
-                        .setDescription("size of write buffer for client. This controls when the system will apply back pressure.")
+                        .setDescription("size of write buffer for client in bytes. This controls when the system will apply back pressure.")
                         .setLongName("write-buffer-size")
                         .setDefaultValue(String.valueOf(64 * 1024)))
                 .addOption(new TypedOption<Integer>()
@@ -394,7 +394,7 @@ public class Proxy extends AbstractVerticle {
 
 
                     if ((Boolean) commandLine.getOptionValue("uuid")
-                            && state == FastDecode.State.query
+                            && (state == FastDecode.State.query || state == FastDecode.State.execute)
                             && scanForUUID(buffer)) {
                         buffer = handleUUID(buffer);
                     }
@@ -407,25 +407,23 @@ public class Proxy extends AbstractVerticle {
                         LOG.error("Destination down - writing only to source!!!");
                     }
 
-                    if (pattern != null
-                            && ((state == FastDecode.State.query) || (state == FastDecode.State.prepare))) {
-                        // we need to filter tables
-                        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
-                        Frame r1 = serverCodec.decode(buffer2);
-                        if (r1.message instanceof Query) {
-                            Query q = (Query) r1.message;
-                            if (pattern.matcher(q.query).matches()) {
-                                onlySource = true;
-                            }
-                        } else if (r1.message instanceof Execute) {
-                            Execute ex = (Execute) r1.message;
-                            // is this a prepared statement for this table
-                            if (filterPreparedQueries.contains(ex.queryId)) {
-                                onlySource = true;
-                            }
-                        } else if (r1.message instanceof Prepare) {
+                    if (pattern != null) {
+                        if (state == FastDecode.State.prepare) {
+                            // we need to check out the prepared statement
+                            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+                            Frame r1 = serverCodec.decode(buffer2);
                             Prepare p = (Prepare) r1.message;
                             if (pattern.matcher(p.cqlQuery).matches()) {
+                                onlySource = true;
+                            }
+                        } else if (state == FastDecode.State.execute) {
+                            byte[] queryId = FastDecode.getQueryId(buffer);
+                            if (filterPreparedQueries.contains(queryId)) {
+                                onlySource = true;
+                            }
+                        } else if (state == FastDecode.State.query) {
+                            String query = FastDecode.getQuery(buffer);
+                            if (pattern.matcher(query).matches()) {
                                 onlySource = true;
                             }
                         }
@@ -457,6 +455,16 @@ public class Proxy extends AbstractVerticle {
 
                             if (ghostProxy && FastDecode.quickLook(buf) == FastDecode.State.result) {
                                 buf = ghostProxySubstitution(buf);
+                            }
+
+                            boolean unprepared = checkUnpreparedTarget(state, f2.result());
+                            if (!unprepared && !(f1.result().equals(f2.result())) &&
+                                    (FastDecode.quickLook(f2.result()) == FastDecode.State.error) &&
+                                    (FastDecode.quickLook(f1.result()) != FastDecode.State.error))
+                            {
+                                BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                                Frame r1 = clientCodec.decode(buffer2);
+                                LOG.error("We received an error from the target but not the source: " + r1.message);
                             }
 
                             if ((Boolean) commandLine.getOptionValue("metrics")) {
@@ -583,7 +591,7 @@ public class Proxy extends AbstractVerticle {
     }
 
     protected boolean checkUnpreparedTarget(FastDecode.State state, Buffer buf) {
-        if (state == FastDecode.State.query && FastDecode.quickLook(buf) == FastDecode.State.error) {
+        if ((state == FastDecode.State.query || state == FastDecode.State.execute) && FastDecode.quickLook(buf) == FastDecode.State.error) {
             BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
             Frame r1 = clientCodec.decode(buffer2);
             if (r1.message instanceof Error) {
@@ -674,27 +682,30 @@ public class Proxy extends AbstractVerticle {
                     .register(registry).increment();
         }
 
-        // Ignore prepared socne we handle that elsewhere and create a substitution, no need to count that
+        // Ignore prepared since we handle that elsewhere and create a substitution, no need to count that
         // against us.
         if (state != FastDecode.State.prepare
                 && !FastDecode.getMessage(f1.result(), ((Boolean)commandLine.getOptionValue("only-message"))).equals(FastDecode.getMessage(f2.result(), (Boolean)commandLine.getOptionValue("only-message")))) {
             try {
                 // Turns out some implementations encode the result differentlty so we need to parse to be sure
-                Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
-                Message m1 = f.message;
-                Frame ff = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result()));
-                Message m2 = ff.message;
-                // .equals is often using Object.equals which is no good
-                //if (!m1.toString().equals(m2.toString())) {
                 Counter.builder("cassandraProxy.cqlOperation.cqlDifferentResultCount")
                         .tag("requestOpcode", String.valueOf(opcode))
                         .tag("requestState", state.toString())
                         .register(registry).increment();
                 LOG.info("Different result");
-                LOG.debug("Recieved cassandra server source: {} ", m1);
-                LOG.debug("Raw: {}", FastDecode.getMessage(f1.result(), (Boolean) commandLine.getOptionValue("only-message")));
-                LOG.debug("Recieved cassandra server destination: {} ", m2);
-                LOG.debug("Raw: {}", FastDecode.getMessage(f2.result(), (Boolean) commandLine.getOptionValue("only-message")));
+                if (LOG.isDebugEnabled()) {
+                    Frame f = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f1.result()));
+                    Message m1 = f.message;
+                    Frame ff = clientCodec.decode(BufferCodec.createPrimitiveBuffer(f2.result()));
+                    Message m2 = ff.message;
+                    // .equals is often using Object.equals which is no good
+                    //if (!m1.toString().equals(m2.toString())) {
+
+                    LOG.debug("Recieved cassandra server source: {} ", m1);
+                    LOG.debug("Raw: {}", FastDecode.getMessage(f1.result(), (Boolean) commandLine.getOptionValue("only-message")));
+                    LOG.debug("Recieved cassandra server destination: {} ", m2);
+                    LOG.debug("Raw: {}", FastDecode.getMessage(f2.result(), (Boolean) commandLine.getOptionValue("only-message")));
+                }
             } catch (Exception e) {
                 LOG.warn("Exception decoding message: ", e);
             }

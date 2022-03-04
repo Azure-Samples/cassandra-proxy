@@ -136,7 +136,7 @@ public class ProxyClient  {
     }
 
     private void write(Buffer buffer) {
-        // Do we need to substitute the quwryId ?
+        // Do we need to substitute the queryId ?
         if ((serverSocket == null) && (buffer.getByte(4) == ProtocolConstants.Opcode.EXECUTE) && !this.prepareSubstitution.isEmpty()) {
             BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
             Frame f = serverCodec.decode(buffer2);

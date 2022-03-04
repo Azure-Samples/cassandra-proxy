@@ -210,7 +210,7 @@ public class FastDecode implements ReadStream<Buffer>, Handler<Buffer>
     }
 
     public enum State {
-        query, analyze, result, prepare, error, event, supported;
+        query, analyze, result, prepare, error, event, supported, execute;
     }
 
     public static State quickLook(Buffer buffer)
@@ -221,8 +221,9 @@ public class FastDecode implements ReadStream<Buffer>, Handler<Buffer>
         {
             case ProtocolConstants.Opcode.QUERY:
             case ProtocolConstants.Opcode.BATCH:
-            case ProtocolConstants.Opcode.EXECUTE:
                 return State.query;
+            case ProtocolConstants.Opcode.EXECUTE:
+                return State.execute;
             case ProtocolConstants.Opcode.PREPARE:
                 return State.prepare;
             case ProtocolConstants.Opcode.ERROR:
@@ -237,25 +238,47 @@ public class FastDecode implements ReadStream<Buffer>, Handler<Buffer>
         return State.analyze;
     }
 
+    public static byte[] getQueryId(Buffer buffer) {
+        int offset = getOffset(buffer);
+        int length = buffer.getUnsignedShort(offset);
+        offset += Short.BYTES;
+        byte[] bytes = new byte[length];
+        buffer.getBytes(offset, offset + bytes.length, bytes);
+        return bytes;
+    }
+
+    public static String getQuery(Buffer buffer) {
+        int offset = getOffset(buffer);
+        int length = buffer.getInt(offset);
+        offset += Integer.BYTES;
+        return buffer.getString(offset, offset + length);
+    }
+
     public static byte[] getMessage(Buffer buffer, boolean onlyMessage) {
         int offset = 9;
         if (onlyMessage) {
-            int flags = buffer.getByte(1);
+            offset = getOffset(buffer);
+        }
+        return buffer.getBytes(offset, buffer.length());
+    }
 
-            if (Flags.contains(flags, 4)) {
-                // skip custom payload
-                int size = buffer.getUnsignedShort(offset);
-                offset = offset +2;
-                for (int i = 0; i < size*2; ++i) {
-                    offset = buffer.getUnsignedShort(offset) + offset + 2;
-                }
-            }
-            if (Flags.contains(flags, 8)) {
-                // skip custom payload
+    private static int getOffset(Buffer buffer) {
+        int offset = 9;
+        int flags = buffer.getByte(1);
+
+        if (Flags.contains(flags, 4)) {
+            // skip custom payload
+            int size = buffer.getUnsignedShort(offset);
+            offset = offset +2;
+            for (int i = 0; i < size*2; ++i) {
                 offset = buffer.getUnsignedShort(offset) + offset + 2;
             }
         }
-        return buffer.getBytes(offset, buffer.length());
+        if (Flags.contains(flags, 8)) {
+            // skip custom payload
+            offset = buffer.getUnsignedShort(offset) + offset + 2;
+        }
+        return offset;
     }
 
     public FastDecode endHandler(Handler<Void> handler) {
