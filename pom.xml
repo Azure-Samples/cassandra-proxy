@@ -11,6 +11,7 @@
     <properties>
         <maven.compiler.source>8</maven.compiler.source>
         <maven.compiler.target>8</maven.compiler.target>
+        <dependency-check-maven.version>5.3.0</dependency-check-maven.version>
     </properties>
 
     <dependencies>
@@ -39,13 +40,13 @@
         <dependency>
             <groupId>io.vertx</groupId>
             <artifactId>vertx-core</artifactId>
-            <version>4.0.3</version>
+            <version>4.2.5</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/com.datastax.oss/native-protocol -->
         <dependency>
             <groupId>com.datastax.oss</groupId>
             <artifactId>native-protocol</artifactId>
-            <version>1.5.0</version>
+            <version>1.5.1</version>
         </dependency>
         <dependency>
             <groupId>com.google.guava</groupId>
@@ -60,7 +61,7 @@
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
-            <version>1.2.3</version>
+            <version>1.2.11</version>
         </dependency>
     </dependencies>
 <build>
@@ -119,4 +120,25 @@
         </plugin> -->
     </plugins>
 </build>
+    <profiles>
+        <profile>
+            <id>owasp-dependency-check</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.owasp</groupId>
+                        <artifactId>dependency-check-maven</artifactId>
+                        <version>${dependency-check-maven.version}</version>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>check</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

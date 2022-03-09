@@ -44,6 +44,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
@@ -69,8 +70,9 @@ public class Proxy extends AbstractVerticle {
     private final UUIDGenWrapper uuidGenWrapper;
     private Credential credential;
     private Pattern pattern;
-    private Set<byte[]> filterPreparedQueries = new ConcurrentHashSet<>();
-    private Map<InetAddress, InetAddress> ghostProxyMap = new HashMap<>();
+    private Set<ByteBuffer> filterPreparedQueries = new ConcurrentHashSet<>();
+    private Map<ByteBuffer, Prepare> prepareMap= new ConcurrentHashMap<>();
+    private Map<InetAddress, InetAddress> ghostProxyMap = Collections.unmodifiableMap(new HashMap<>());
 
 
     public Proxy() {
@@ -168,7 +170,7 @@ public class Proxy extends AbstractVerticle {
                         .setType(Boolean.class)
                         .setLongName("uuid")
                         .setDescription("scan for uuid and generate on proxy for inserts/updates")
-                        .setDefaultValue("true"))
+                        .setDefaultValue("false"))
                 .addOption(new TypedOption<Boolean>()
                         .setType(Boolean.class)
                         .setLongName("metrics")
@@ -346,14 +348,15 @@ public class Proxy extends AbstractVerticle {
             } catch (Exception e) {
                 LOG.error("Error parsing --ghostIps ", e);
             }
+            Map<InetAddress, InetAddress> map = new HashMap<>();
             for (Map.Entry<String, Object> ips : object) {
                 if (!(ips.getValue() instanceof  String)) {
                     LOG.error("Can't parse ghotsIp" + object);
                     System.exit(1);
                 }
-                this.ghostProxyMap.put(InetAddress.getByName(ips.getKey()), InetAddress.getByName((String)ips.getValue()));
+               map.put(InetAddress.getByName(ips.getKey()), InetAddress.getByName((String)ips.getValue()));
             }
-
+            this.ghostProxyMap = Collections.unmodifiableMap(map);
         }
 
         int idleTimeOut = commandLine.getOptionValue("tcp-idle-time-out");
@@ -392,6 +395,7 @@ public class Proxy extends AbstractVerticle {
                         }
                     }
 
+                    Frame decoded = null;
 
                     if ((Boolean) commandLine.getOptionValue("uuid")
                             && (state == FastDecode.State.query || state == FastDecode.State.execute)
@@ -402,23 +406,44 @@ public class Proxy extends AbstractVerticle {
                     boolean ghostProxy =  (!ghostProxyMap.isEmpty())
                             && state == FastDecode.State.query && (scanForPeers(buffer) || scanForPeersV2(buffer)) ;
 
+                    Prepare keyspaceTable = null;
+                    if (state == FastDecode.State.prepare) {
+                        // we need to check out the prepared statement
+                        BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+                        decoded = serverCodec.decode(buffer2);
+                        keyspaceTable = (Prepare) decoded.message;
+                    }
+                    final Prepare prepareCache = keyspaceTable;
+
                     boolean onlySource = client2.isClosed(); //only write to source if destination is closed
                     if (onlySource) {
-                        LOG.error("Destination down - writing only to source!!!");
+                        if (state == FastDecode.State.query) {
+                            LOG.error("Destination down - writing only to source. Query: " + FastDecode.getQuery(buffer));
+                        } else if (state == FastDecode.State.execute) {
+                            byte[] b = FastDecode.getQueryId(buffer);
+                            Prepare prepare = prepareMap.get(ByteBuffer.wrap(b));
+                            if (prepare != null) {
+                                LOG.error("Destination down - writing only to source. Prepared Statement Keyspace: " + prepare.keyspace + " Query: " + prepare.cqlQuery );
+                            } else {
+                                LOG.error("Destination down - writing only to source. Prepared Statement not found");
+                            }
+                        }
                     }
 
                     if (pattern != null) {
                         if (state == FastDecode.State.prepare) {
                             // we need to check out the prepared statement
-                            BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
-                            Frame r1 = serverCodec.decode(buffer2);
-                            Prepare p = (Prepare) r1.message;
+                            if (decoded == null) {
+                                BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buffer);
+                                decoded = serverCodec.decode(buffer2);
+                            }
+                            Prepare p = (Prepare) decoded.message;
                             if (pattern.matcher(p.cqlQuery).matches()) {
                                 onlySource = true;
                             }
                         } else if (state == FastDecode.State.execute) {
                             byte[] queryId = FastDecode.getQueryId(buffer);
-                            if (filterPreparedQueries.contains(queryId)) {
+                            if (filterPreparedQueries.contains(ByteBuffer.wrap(queryId))) {
                                 onlySource = true;
                             }
                         } else if (state == FastDecode.State.query) {
@@ -454,6 +479,14 @@ public class Proxy extends AbstractVerticle {
                                         client2.addPrepareSubstitution(res1.preparedQueryId, res2.preparedQueryId);
                                         LOG.debug("substituting {} for {}", res1.preparedQueryId, res2.preparedQueryId);
                                     }
+                                }
+                            }
+                            if (prepareCache != null) {
+                                BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
+                                Frame r1 = clientCodec.decode(buffer2);
+                                if (r1.message instanceof Prepared) {
+                                    Prepared res1 = (Prepared) r1.message;
+                                    prepareMap.put(ByteBuffer.wrap(res1.preparedQueryId), prepareCache);
                                 }
                             }
 
@@ -497,7 +530,10 @@ public class Proxy extends AbstractVerticle {
                                 Frame r1 = clientCodec.decode(buffer2);
                                 if (r1.message instanceof Prepared) {
                                     Prepared res1 = (Prepared) r1.message;
-                                    filterPreparedQueries.add(res1.preparedQueryId);
+                                    filterPreparedQueries.add(ByteBuffer.wrap(res1.preparedQueryId));
+                                    if (prepareCache != null) {
+                                        prepareMap.put(ByteBuffer.wrap(res1.preparedQueryId), prepareCache);
+                                    }
                                 }
                             }
                             if (commandLine.getOptionValue("wait")) {
