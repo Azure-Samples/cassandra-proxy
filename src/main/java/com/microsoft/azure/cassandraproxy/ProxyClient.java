@@ -66,6 +66,10 @@ public class ProxyClient  {
     // but we will cache them for the life of the proxy to save memory
     private static Map<String, byte[]> prepareSubstitution = new ConcurrentHashMap<>();
     private boolean closed = false;
+    // for metrics
+    private Map<Short, Long> startTime = new ConcurrentHashMap<>();
+    private Map<Short, Long> endTime = new ConcurrentHashMap<>();
+
 
 
     public ProxyClient(String identifier, NetSocket socket, List<String> protocolVersions, List<String> cqlVersions, List<String> compressions, boolean compressionEnabled, boolean metrics, boolean wait, Credential credential) {
@@ -123,7 +127,9 @@ public class ProxyClient  {
 
     public Promise<Buffer> writeToServer(Buffer buffer) {
         bufferPromise = Promise.promise();
-        results.put(buffer.getShort(2), bufferPromise);
+        short streamId = buffer.getShort(2);
+        results.put(streamId, bufferPromise);
+        startTime.put(streamId, System.nanoTime());
         if (socketPromise != null) {
             socketPromise.future().onSuccess(t -> {
                 write(buffer);
@@ -251,7 +257,9 @@ public class ProxyClient  {
         }
         short streamId = buffer.getShort(2);
         if (results.containsKey(streamId)) {
-            if (!results.get(streamId).tryComplete(buffer)) {
+            Promise promise = results.get(streamId);
+            endTime.put(streamId, System.nanoTime());
+            if (!promise.tryComplete(buffer)) {
                 LOG.warn("out of band: {}", buffer);
             }
             results.remove(streamId); // we are done with that
@@ -275,4 +283,11 @@ public class ProxyClient  {
         return closed;
     }
 
+    public Long getStartTime(short streamId) {
+        return startTime.remove(streamId);
+    }
+
+    public Long getEndTime(short streamId) {
+        return endTime.remove(streamId);
+    }
 }

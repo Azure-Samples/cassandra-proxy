@@ -459,13 +459,15 @@ public class Proxy extends AbstractVerticle {
                     }
 
                     final long endTime = System.nanoTime();
+                    final Buffer clientBuffer = buffer;
                     Future<Buffer> f1 = client1.writeToServer(buffer).future();
                     if (!onlySource) {
                         Future<Buffer> f2 = client2.writeToServer(buffer).future();
                         CompositeFuture.all(f1, f2).onComplete(e -> {
                             Buffer buf = f1.result();
+                            FastDecode.State sourceState = FastDecode.quickLook(buf);
 
-                            if (state == FastDecode.State.prepare && !(f1.result().equals(f2.result()))) {
+                            if (state == FastDecode.State.prepare && !(buf.equals(f2.result()))) {
                                 // check if we need to substitute
                                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
                                 Frame r1 = clientCodec.decode(buffer2);
@@ -490,22 +492,36 @@ public class Proxy extends AbstractVerticle {
                                 }
                             }
 
-                            if (ghostProxy && FastDecode.quickLook(buf) == FastDecode.State.result) {
+                            if (ghostProxy && sourceState == FastDecode.State.result) {
                                 buf = ghostProxySubstitution(buf);
                             }
 
                             boolean unprepared = checkUnpreparedTarget(state, f2.result());
-                            if (!unprepared && !(f1.result().equals(f2.result())) &&
+                            if (!unprepared && !(buf.equals(f2.result())) &&
                                     (FastDecode.quickLook(f2.result()) == FastDecode.State.error) &&
-                                    (FastDecode.quickLook(f1.result()) != FastDecode.State.error))
+                                    (sourceState != FastDecode.State.error))
                             {
                                 BufferCodec.PrimitiveBuffer buffer2 = BufferCodec.createPrimitiveBuffer(buf);
                                 Frame r1 = clientCodec.decode(buffer2);
-                                LOG.error("We received an error from the target but not the source: " + r1.message);
+                                buffer2 = BufferCodec.createPrimitiveBuffer(f2.result());
+                                Frame r2 = clientCodec.decode(buffer2);
+                                LOG.error(String.format("We received an error from the target but not the source. Source Result: %s Error: %s",
+                                        r1.message.toString(), r2.message.toString()));
+                                if (state == FastDecode.State.query) {
+                                    LOG.error("Query: " + FastDecode.getQuery(clientBuffer));
+                                } else if (state == FastDecode.State.execute) {
+                                    byte[] b = FastDecode.getQueryId(clientBuffer);
+                                    Prepare prepare = prepareMap.get(ByteBuffer.wrap(b));
+                                    if (prepare != null) {
+                                        LOG.error("Error only target: Prepared Statement Keyspace: " + prepare.keyspace + " Query: " + prepare.cqlQuery );
+                                    } else {
+                                        LOG.error("Error only target: Prepared Statement not found");
+                                    }
+                                }
                             }
 
                             if ((Boolean) commandLine.getOptionValue("metrics")) {
-                                sendMetrics(startTime, opcode, state, endTime, f1, f2, buf);
+                                sendMetrics(startTime, opcode, state, endTime, f1, f2, buf, client1, client2);
                             }
 
                             if (commandLine.getOptionValue("wait")) {
@@ -713,7 +729,7 @@ public class Proxy extends AbstractVerticle {
         }
     }
 
-    private void sendMetrics(long startTime, int opcode, FastDecode.State state, long endTime, Future<Buffer> f1, Future<Buffer> f2, Buffer buf) {
+    private void sendMetrics(long startTime, int opcode, FastDecode.State state, long endTime, Future<Buffer> f1, Future<Buffer> f2, Buffer buf, ProxyClient client1, ProxyClient client2) {
         MeterRegistry registry = BackendRegistries.getDefaultNow();
         if (FastDecode.quickLook(buf) == FastDecode.State.error) {
             Counter.builder("cassandraProxy.cqlOperation.cqlServerErrorCount")
@@ -759,6 +775,21 @@ public class Proxy extends AbstractVerticle {
                 .tag("requestState", state.toString())
                 .register(registry)
                 .record(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
+        short streamId = buf.getShort(2);
+        sendProxyClientMetric("cassandraProxy.cqlOperationSourceCassandra.timer",opcode, state, client1, registry, streamId);
+        sendProxyClientMetric("cassandraProxy.cqlOperationTargetCassandra.timer",opcode, state, client2, registry, streamId);
+    }
+
+    private void sendProxyClientMetric(String metricName, int opcode, FastDecode.State state, ProxyClient client1, MeterRegistry registry, short streamId) {
+        Long sourceStart = client1.getStartTime(streamId);
+        Long sourceEnd = client1.getEndTime(streamId);
+        if (sourceEnd != null && sourceEnd != null) {
+            Timer.builder(metricName)
+                    .tag("requestOpcode", String.valueOf(opcode))
+                    .tag("requestState", state.toString())
+                    .register(registry)
+                    .record(sourceEnd-sourceStart, TimeUnit.NANOSECONDS);
+        }
     }
 
     protected Buffer handleUUID(Buffer buffer) {
