@@ -505,8 +505,14 @@ public class Proxy extends AbstractVerticle {
                                 Frame r1 = clientCodec.decode(buffer2);
                                 buffer2 = BufferCodec.createPrimitiveBuffer(f2.result());
                                 Frame r2 = clientCodec.decode(buffer2);
-                                LOG.error(String.format("We received an error from the target but not the source. Source Result: %s Error: %s",
-                                        r1.message.toString(), r2.message.toString()));
+                                
+                                int errorCode = -1;
+                                if (r2.message instanceof Error) {
+                                    Error error = (Error) r2.message;
+                                    errorCode = error.code;
+                                }
+                                LOG.error(String.format("We received an error from the target but not the source. Source Result: %s Error: %s ErrorCode: %d",
+                                        r1.message.toString(), r2.message.toString(), errorCode));
                                 if (state == FastDecode.State.query) {
                                     LOG.error("Query: " + FastDecode.getQuery(clientBuffer));
                                 } else if (state == FastDecode.State.execute) {
