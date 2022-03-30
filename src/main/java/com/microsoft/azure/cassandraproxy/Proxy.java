@@ -506,7 +506,7 @@ public class Proxy extends AbstractVerticle {
                                 buffer2 = BufferCodec.createPrimitiveBuffer(f2.result());
                                 Frame r2 = clientCodec.decode(buffer2);
                                 
-                                int errorCode = 0;
+                                int errorCode = -1;
                                 if (r2.message instanceof Error) {
                                     Error error = (Error) r2.message;
                                     errorCode = error.code;
