@@ -22,11 +22,17 @@ To see it in action watch our ApacheCon presentation:
 ## Quickstart
 (Add steps to get up and running quickly assuming you have java and maven installed)
 
+To build the proxy yourself run:
 1. git clone https://github.com/Azure-Samples/cassandra-proxy.git
 2. cd cassandra-proxy
 3. mvn package
+
+Alternatively, you can download the jar from the release section: https://github.com/Azure-Samples/cassandra-proxy/releases/
+
+Then run:
 4. java -jar target/cassandra-proxy-1.0-SNAPSHOT-fat.jar source-server destination-server
 5. cqlsh  -u user -p password localhost 29042
+
 
 ## Docker
 If you uncomment the jib plugin in the pom.xml `mvn package` will also create a (local) docker image. To use this run `docker run cosmos.microsoft.com/cassandra-proxy source destination`. You can push it to an adequate registry if needed on a different server.
@@ -64,6 +70,18 @@ This can be done with `--ghostIps '{"10.25.0.12":"192.168.1.45"}` which will rep
 This feature can also be leveraged to minimize risk in a migration to quickly switch back and fort between source
 and destination cassandra.
 
+## Production settings
+Since the proxy opens two new connections for each client connections it's advisable
+to increase the `ulimit` for open files for the user who is running cassandra-proxy
+
+Other useful settings when starting the proxy are:
+
+|Parameter |Description |Comment |
+|---------|-----------|-------|
+|--threads 10 | launches more than 1 thread | Increasing this cuts back on latency |
+|--write-buffer-size 2097152 | size of write buffer for client in bytes | the default of 64KB might throttle if big objects are used |
+|--tcp-idle-time-out |  TCP Idle Time Out in s (0 for infinite) | set this to the same value as the clients and the server. A mismatch might lead to not closing all the connections in a timely manner and running out of sockets |
+
 
 ## Future Plans
 * Read Reports
@@ -81,8 +99,14 @@ and destination cassandra.
   * This is especially difficult for schema changes
 * Metrics are WIP - we noticed that some C* versions/implementations pad results differently
 * TLS on the backend servers doesn't do hostname validation nor client certs nor...
-* Proxy needs to run on the same host as the source Cassandra if errors and crazyness needs to be avoided
 
 ## Resources
 
 TBD
+
+## How to make a release (contributors only)
+1. Tag what you want to release `git tag v1.0.0` 
+2. Push the tags `git push upstream main --tags` (you might have named repos differently)
+3. In github.com click "New Release" and select the tag
+4. Upload the jar you build before from your workstation. Make sure to wait until it's fully uploaded
+5. Submit
